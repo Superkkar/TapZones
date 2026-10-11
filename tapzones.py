@@ -814,6 +814,7 @@ def cmd_tray(args, extra):
 
     def quit_panel(icon, item):
         alive["v"] = False
+        stop()                      # ferma anche 'run': il microfono viene rilasciato davvero
         icon.stop()
 
     def toggle(icon, item):
@@ -827,7 +828,7 @@ def cmd_tray(args, extra):
         pystray.MenuItem(lambda i: "Riprendi" if PAUSE_FLAG.exists() else "Metti in pausa (Ctrl+Alt+P)",
                          toggle, enabled=lambda i: running()),
         pystray.MenuItem("Ferma", stop, enabled=lambda i: running()),
-        pystray.MenuItem("Chiudi icona (lo script resta com'è)", quit_panel),
+        pystray.MenuItem("Esci (ferma anche l'ascolto)", quit_panel),
     )
     icon = pystray.Icon("tapzones", imgs["red"], "TapZones", menu)
 
@@ -845,7 +846,10 @@ def cmd_tray(args, extra):
                 last = cur
             time.sleep(1)
 
-    icon.run(watcher)
+    try:
+        icon.run(watcher)
+    finally:
+        stop()                      # anche con Ctrl+C: non lascia 'run' in giro
 
 
 def main():

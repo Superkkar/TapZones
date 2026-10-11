@@ -51,8 +51,18 @@ python tapzones.py run --dry
 
 ```bash
 python tapzones.py calibrate
-python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 12
+python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 20
 ```
+
+Se non indichi `--samples`, il programma ti chiede quanti tocchi registrare per ogni zona:
+
+| Scelta | Quando usarla |
+|--------|---------------|
+| `10` | veloce, va bene in un ambiente silenzioso |
+| `20` | consigliato (premendo solo INVIO si sceglie questo) |
+| `50` | più robusto (rumore o musica in sottofondo), ma richiede più tempo |
+
+Con `--samples N` la domanda viene saltata.
 
 Per ogni zona premi INVIO e tocca quell'area il numero di volte richiesto, variando un po' il punto. Alla fine vedi l'accuratezza stimata e una matrice di confusione; se una zona è debole puoi rifarla prima di salvare.
 
@@ -95,7 +105,7 @@ Mostra un'icona che avvia anche `run` in background:
 - 🟠 arancione: in pausa
 - 🔴 rosso: non in esecuzione
 
-Dal menu puoi avviare, mettere in pausa e fermare. Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
+Dal menu puoi avviare, mettere in pausa e fermare. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
 
 ## Pausa automatica e manuale
 
@@ -118,6 +128,7 @@ Su Windows puoi anche usare **Ctrl+Alt+P**:
 | Opzione | Comando | Descrizione |
 |---------|---------|-------------|
 | `--device N` | tutti | Indice del microfono (vedi `devices`) |
+| `--samples N` | `calibrate` | Tocchi per zona (se omesso te lo chiede: 10, 20 o 50) |
 | `--sensitivity X` | `calibrate`, `run` | `>1` = più sensibile |
 | `--gain X` | `meter`, `calibrate`, `run` | Amplificazione software del segnale |
 | `--min-conf X` | `run` | Confidenza minima (0-1, default 0.15) |
@@ -130,6 +141,14 @@ python tapzones.py negatives
 ```
 
 Registra esempi di voce, tastiera e rumori da ignorare e li aggiunge al profilo.
+
+## Problemi comuni
+
+**`PortAudioError: Error opening InputStream: Invalid device [PaErrorCode -9996]`**
+
+- Lo stesso microfono compare più volte in `devices`, una per ogni driver (MME, DirectSound, WASAPI, WDM-KS). Le voci **WDM-KS** spesso non si aprono: prova quelle **MME** o **WASAPI**. Per vedere il driver di ogni voce: `python -c "import sounddevice as sd; print(sd.query_devices())"`.
+- Controlla che non ci sia già un `run` attivo (anche in background dall'icona) che tiene occupato il microfono: fermalo dal menu dell'icona con **Esci** o dal Task Manager (`python.exe`).
+- Gli indici possono cambiare quando colleghi o scolleghi dispositivi audio: rifai `devices`.
 
 ## File generati
 
