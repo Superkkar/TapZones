@@ -8,7 +8,7 @@ Uso:
     pip install numpy sounddevice          (opzionale: pyautogui per le scorciatoie da tastiera)
     python tapzones.py devices             # elenca i microfoni
     python tapzones.py meter --device 1    # controlla che il microfono senta i tap
-    python tapzones.py calibrate           # registra le zone (default: sinistra,destra,sopra)
+    python tapzones.py calibrate           # registra le zone (default: sinistra,destra,sotto)
     python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 12
     python tapzones.py tray --autostart    # icona nella barra (verde/arancione/rosso) che avvia anche 'run'
     python tapzones.py negatives           # (opzionale) insegna a ignorare voce e rumori
@@ -18,7 +18,7 @@ Uso:
 Azioni (file actions.json, creato dopo la calibrazione):
     {"sinistra": {"type": "url",  "value": "https://youtube.com"},
      "destra":   {"type": "keys", "value": "playpause"},
-     "sopra":    {"type": "run",  "value": "calc.exe"}}
+     "sotto":    {"type": "run",  "value": "calc.exe"}}
     type: none | url | run | keys   (keys richiede pyautogui; es. "ctrl+shift+m", "volumeup")
 ATTENZIONE: le azioni "run" vengono eseguite automaticamente a ogni tap riconosciuto.
 """
@@ -823,7 +823,7 @@ def main():
         s.add_argument("--gain", type=float, default=1.0 if name == "calibrate" else None,
                        help="amplificazione software (se omesso in run: quella della calibrazione)")
         if name == "calibrate":
-            s.add_argument("--zones", default="sinistra,destra,sopra")
+            s.add_argument("--zones", default="sinistra,destra,sotto")
             s.add_argument("--samples", type=int, default=10)
         else:
             s.add_argument("--min-conf", type=float, default=0.15, help="confidenza minima (0-1)")

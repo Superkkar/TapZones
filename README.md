@@ -2,7 +2,7 @@
 
 Tocca la scrivania, il PC esegue un'azione.
 
-TapZones usa il microfono del tuo computer per capire **dove** stai battendo sulla scrivania (sinistra, destra, sopra… le zone le scegli tu) e lancia l'azione che hai assegnato a quella zona: aprire un sito, premere una scorciatoia, avviare un programma.
+TapZones usa il microfono del tuo computer per capire **dove** stai battendo sulla scrivania (sinistra, destra, sotto… le zone le scegli tu) e lancia l'azione che hai assegnato a quella zona: aprire un sito, premere una scorciatoia, avviare un programma.
 
 È scritto in Python, funziona tutto in locale e non registra né salva l'audio.
 
@@ -68,7 +68,7 @@ Alla prima calibrazione viene creato `actions.json`. In alternativa parti da `ac
 {
   "sinistra": { "type": "url",  "value": "https://www.youtube.com" },
   "destra":   { "type": "keys", "value": "playpause" },
-  "sopra":    { "type": "run",  "value": "calc.exe" }
+  "sotto":    { "type": "run",  "value": "calc.exe" }
 }
 ```
 

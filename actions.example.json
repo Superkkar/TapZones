@@ -7,7 +7,7 @@
     "type": "keys",
     "value": "playpause"
   },
-  "sopra": {
+  "sotto": {
     "type": "run",
     "value": "calc.exe"
   }
