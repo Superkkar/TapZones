@@ -613,7 +613,23 @@ def cmd_run(args):
     if st and st.get("pid") != os.getpid():
         sys.exit(f"TapZones è già in esecuzione (PID {st['pid']}). Chiudilo prima di avviarne un altro.")
     PAUSE_FLAG.unlink(missing_ok=True)
-    hotkey = start_hotkey(toggle_pause_flag)
+
+    # Stato condiviso con la scorciatoia (che gira in un altro thread):
+    #   app_paused = in questo momento sono in pausa per un'app "da chiamata" (o per il tempo di attesa dopo);
+    #   override   = l'utente ha forzato la ripresa: ignoro la pausa per app finché quell'app resta in primo piano.
+    ps = {"app_paused": False, "override": False}
+
+    def on_hotkey():
+        """Ctrl+Alt+P: se sono in pausa (manuale o per app) riprende subito, altrimenti mette in pausa."""
+        was_manual = PAUSE_FLAG.exists()
+        if was_manual:
+            PAUSE_FLAG.unlink(missing_ok=True)
+        if ps["app_paused"]:
+            ps["override"] = True                 # riprendo anche se l'app è ancora in primo piano
+        elif not was_manual:
+            PAUSE_FLAG.write_text("1")            # non ero in pausa: pausa manuale
+
+    hotkey = start_hotkey(on_hotkey)
 
     def stamp():
         return time.strftime("%H:%M:%S")
@@ -641,16 +657,24 @@ def cmd_run(args):
 
     def pause_reason():
         nonlocal last_app
-        if PAUSE_FLAG.exists():
-            return "pausa manuale (Ctrl+Alt+P per riprendere)"
         title = foreground_title().lower()
         hit = next((k for k in keywords if k in title), None)
         if hit:
             last_app = time.time()
-            return f"app «{hit}» in primo piano"
-        if keywords and time.time() - last_app < args.pause_hold:
-            return f"da poco in «{hit or 'app di chiamata'}» (riprendo tra pochi minuti)"
-        return None
+            app_reason = f"app «{hit}» in primo piano (Ctrl+Alt+P per riprendere subito)"
+        elif keywords and time.time() - last_app < args.pause_hold:
+            app_reason = "da poco in un'app di chiamata (Ctrl+Alt+P per riprendere subito)"
+        else:
+            app_reason = None
+        if ps["override"]:
+            if hit is None:                       # ho lasciato l'app: torno al comportamento normale
+                ps["override"] = False
+                last_app = 0.0                    # e niente tempo di attesa extra
+            app_reason = None
+        ps["app_paused"] = app_reason is not None
+        if PAUSE_FLAG.exists():
+            return "pausa manuale (Ctrl+Alt+P per riprendere)"
+        return app_reason
 
     print("In ascolto... (Ctrl+C per uscire)" + ("  [DRY RUN: nessuna azione]" if args.dry else ""))
     print(f"Pausa automatica con: {', '.join(keywords) if keywords else 'disattivata'}"

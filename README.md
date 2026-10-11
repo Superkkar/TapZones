@@ -107,7 +107,11 @@ python tapzones.py run --pause-apps ""             # disattiva
 python tapzones.py run --pause-hold 300            # secondi di pausa extra
 ```
 
-Su Windows puoi anche mettere in pausa o riprendere a mano con **Ctrl+Alt+P**.
+Su Windows puoi anche usare **Ctrl+Alt+P**:
+
+- se TapZones è in ascolto, mette in pausa a mano;
+- se è in pausa a mano, riprende;
+- se è in pausa perché c'è un'app "da chiamata" in primo piano (o nei minuti successivi), **riprende subito**, anche se quell'app è ancora aperta. Quando passi a un'altra finestra torna il comportamento normale.
 
 ## Opzioni utili
 
