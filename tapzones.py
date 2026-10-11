@@ -810,6 +810,11 @@ def cmd_tray(args, extra):
         finally:
             write_status("stopped")
 
+    def restart(icon=None, item=None):
+        stop()                      # se non è in esecuzione non fa nulla
+        time.sleep(0.5)             # lascia il tempo al microfono di liberarsi
+        start()
+
     alive = {"v": True}
 
     def quit_panel(icon, item):
@@ -825,6 +830,7 @@ def cmd_tray(args, extra):
         pystray.MenuItem(lambda i: "TapZones: " + state()[1], lambda i: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Avvia", start, enabled=lambda i: not running()),
+        pystray.MenuItem("Riavvia", restart),
         pystray.MenuItem(lambda i: "Riprendi" if PAUSE_FLAG.exists() else "Metti in pausa (Ctrl+Alt+P)",
                          toggle, enabled=lambda i: running()),
         pystray.MenuItem("Ferma", stop, enabled=lambda i: running()),

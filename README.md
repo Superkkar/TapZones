@@ -105,7 +105,7 @@ Mostra un'icona che avvia anche `run` in background:
 - 🟠 arancione: in pausa
 - 🔴 rosso: non in esecuzione
 
-Dal menu puoi avviare, mettere in pausa e fermare. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
+Dal menu puoi avviare, **riavviare** (utile dopo aver ricalibrato o cambiato opzioni), mettere in pausa e fermare. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
 
 ## Pausa automatica e manuale
 
