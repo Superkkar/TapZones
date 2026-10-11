@@ -516,11 +516,30 @@ def cmd_negatives(args):
     print("Profilo aggiornato. Ora i suoni simili ai negativi vengono ignorati da 'run'.")
 
 
+_CUR_STATE = None        # ultimo stato scritto da questo processo
+_LAST_EVENT = None       # ultimo tap visto da 'run' (l'icona lo mostra con un lampeggio)
+
+
 def write_status(state, reason=""):
+    global _CUR_STATE
+    _CUR_STATE = (state, reason)
+    d = {"state": state, "reason": reason, "pid": os.getpid(), "ts": time.time()}
+    if _LAST_EVENT:
+        d["event"] = _LAST_EVENT
     tmp = STATUS.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"state": state, "reason": reason, "pid": os.getpid(), "ts": time.time()},
-                              ensure_ascii=False))
+    tmp.write_text(json.dumps(d, ensure_ascii=False))
     os.replace(tmp, STATUS)
+
+
+def note_event(kind, text):
+    """Registra l'ultimo tap in status.json. kind: 'ok' (azione eseguita) o 'rej' (rifiutato/ignorato)."""
+    global _LAST_EVENT
+    now = time.time()
+    if kind == "rej" and _LAST_EVENT and _LAST_EVENT["kind"] == "rej" and now - _LAST_EVENT["ts"] < 3:
+        return                                   # con musica/film non deve lampeggiare di continuo
+    _LAST_EVENT = {"kind": kind, "text": text, "ts": now}
+    if _CUR_STATE:
+        write_status(*_CUR_STATE)
 
 
 def pid_alive(pid):
@@ -550,9 +569,16 @@ def pid_alive(pid):
 
 def read_status():
     """Stato di 'run' se è vivo, altrimenti None (il file viene scritto solo ai cambi di stato)."""
-    try:
-        d = json.loads(STATUS.read_text())
-    except Exception:
+    if not STATUS.exists():
+        return None
+    d = None
+    for _ in range(3):                  # su Windows la lettura può cadere proprio mentre il file viene sostituito
+        try:
+            d = json.loads(STATUS.read_text())
+            break
+        except Exception:
+            time.sleep(0.02)
+    if d is None:
         return None
     if d.get("state") == "stopped" or not pid_alive(d.get("pid")):
         return None
@@ -657,12 +683,15 @@ def cmd_run(args):
     def handle(kind, data):
         if kind == "rej":
             print(f"  · ignorato: {data}")
+            if "debole" in data:                 # solo i tap mancati; suoni prolungati/voce non fanno lampeggiare
+                note_event("rej", f"ignorato: {data}")
             return
         t0 = time.perf_counter()
         zone, conf, why = model.predict(features(data, sr), prof["ood"], args.min_conf)
         ms = (time.perf_counter() - t0) * 1000
         if zone is None:
             print(f"  ? rifiutato: {why} (conf {conf:.2f})")
+            note_event("rej", f"rifiutato: {why} ({conf:.2f})")
         elif zone >= len(names):
             print(f"  · scartato: sembra voce/rumore (conf {conf:.2f})")
         else:
@@ -670,6 +699,7 @@ def cmd_run(args):
             load_actions()
             act = actions.get(name, {"type": "none"})
             print(f"  ✔ {name}  conf {conf:.2f}  ({ms:.0f} ms)  -> {act.get('type', 'none')}")
+            note_event("ok", f"{name} ({conf:.2f})")
             if not args.dry:
                 do_action(act)
 
@@ -766,7 +796,9 @@ def cmd_tray(args, extra):
     except ImportError:
         sys.exit("Servono due pacchetti: pip install pystray pillow")
     import threading
-    colors = {"green": (34, 197, 94), "orange": (245, 158, 11), "red": (239, 68, 68)}
+    colors = {"green": (34, 197, 94), "orange": (245, 158, 11), "red": (239, 68, 68),
+              "blue": (59, 130, 246), "gray": (148, 163, 184)}     # blu/grigio = lampeggio: tap riconosciuto/rifiutato
+    FLASH_S = 0.6
 
     def make(rgb):
         im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -780,7 +812,13 @@ def cmd_tray(args, extra):
         if st is None:
             return "red", "non in esecuzione"
         if st["state"] == "listening":
-            return "green", "in ascolto"
+            ev = st.get("event")
+            text = "in ascolto"
+            if ev:
+                text += f" | ultimo: {ev['text']} ({time.strftime('%H:%M:%S', time.localtime(ev['ts']))})"
+                if time.time() - ev["ts"] < FLASH_S:
+                    return ("blue" if ev["kind"] == "ok" else "gray"), text
+            return "green", text
         return "orange", "in pausa: " + (st.get("reason") or "")
 
     def running():
@@ -850,7 +888,7 @@ def cmd_tray(args, extra):
                 icon.title = ("TapZones - " + cur[1])[:120]
                 icon.update_menu()
                 last = cur
-            time.sleep(1)
+            time.sleep(0.15)
 
     try:
         icon.run(watcher)

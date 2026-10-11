@@ -105,6 +105,8 @@ Mostra un'icona che avvia anche `run` in background:
 - 🟠 arancione: in pausa
 - 🔴 rosso: non in esecuzione
 
+A ogni tap l'icona **lampeggia per mezzo secondo**: 🔵 **blu** se il tap è stato riconosciuto (azione eseguita), ⚪ **grigio** se è sembrato un tap ma è stato rifiutato (ambiguo, non calibrato, troppo debole), al massimo una volta ogni 3 secondi: voce e suoni prolungati non fanno lampeggiare l'icona. Passando il mouse sull'icona vedi l'ultimo evento con l'orario, per esempio `ultimo: sinistra (0.62) (14:32:05)` oppure `ultimo: rifiutato: ambiguo tra zone (0.08)`: utile per capire perché un tap non fa nulla senza aprire il terminale.
+
 Dal menu puoi avviare, **riavviare** (utile dopo aver ricalibrato o cambiato opzioni), mettere in pausa e fermare. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
 
 ## Pausa automatica e manuale
