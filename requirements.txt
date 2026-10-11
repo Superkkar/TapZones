@@ -1,0 +1,7 @@
+numpy
+sounddevice
+
+# Opzionali:
+# pyautogui     # azioni di tipo "keys" (scorciatoie da tastiera, tasti multimediali)
+# pystray       # icona nella barra di sistema (comando "tray")
+# pillow        # necessario a pystray

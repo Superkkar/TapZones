@@ -1,0 +1,14 @@
+{
+  "sinistra": {
+    "type": "url",
+    "value": "https://www.youtube.com"
+  },
+  "destra": {
+    "type": "keys",
+    "value": "playpause"
+  },
+  "sopra": {
+    "type": "run",
+    "value": "calc.exe"
+  }
+}
