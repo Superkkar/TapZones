@@ -9,7 +9,7 @@ Uso:
     python tapzones.py devices             # elenca i microfoni
     python tapzones.py meter --device 1    # controlla che il microfono senta i tap
     python tapzones.py calibrate           # registra le zone (default: sinistra,destra,sotto)
-    python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 12
+    python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 20
     python tapzones.py tray --autostart    # icona nella barra (verde/arancione/rosso) che avvia anche 'run'
     python tapzones.py negatives           # (opzionale) insegna a ignorare voce e rumori
     python tapzones.py run                 # ascolta ed esegue le azioni di actions.json
@@ -377,10 +377,30 @@ def collect_zone(L, sr, name, n):
     return out
 
 
+def ask_samples():
+    """Chiede quanti tocchi registrare per ogni zona (10, 20 o 50)."""
+    print("\nQuanti tocchi per zona vuoi registrare?")
+    print("  10 = veloce, va bene in un ambiente silenzioso")
+    print("  20 = consigliato")
+    print("  50 = più robusto (rumore o musica in sottofondo), ma richiede più tempo")
+    while True:
+        try:
+            ans = input("Scegli 10, 20 o 50 [INVIO = 20]: ").strip()
+        except EOFError:
+            return 20
+        if not ans:
+            return 20
+        if ans in ("10", "20", "50"):
+            return int(ans)
+        print("Scelta non valida.")
+
+
 def cmd_calibrate(args):
     names = [z.strip() for z in args.zones.split(",") if z.strip()]
     if len(names) < 2:
         sys.exit("Servono almeno 2 zone.")
+    if args.samples is None:
+        args.samples = ask_samples()
     sr, ch, dev_name = pick_device(args.device)
     print(f"Microfono: {dev_name} | {ch} canale/i | {sr} Hz")
     print("Tieni il PC fermo nella posizione in cui lo userai. Spostarlo invalida la calibrazione.")
@@ -848,7 +868,8 @@ def main():
                        help="amplificazione software (se omesso in run: quella della calibrazione)")
         if name == "calibrate":
             s.add_argument("--zones", default="sinistra,destra,sotto")
-            s.add_argument("--samples", type=int, default=10)
+            s.add_argument("--samples", type=int, default=None,
+                           help="tocchi per zona (se omesso te lo chiede: 10, 20 o 50)")
         else:
             s.add_argument("--min-conf", type=float, default=0.15, help="confidenza minima (0-1)")
             s.add_argument("--dry", action="store_true", help="non eseguire le azioni")
