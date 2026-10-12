@@ -9,6 +9,7 @@ Uso:
     python tapzones.py devices             # elenca i microfoni
     python tapzones.py meter --device 1    # controlla che il microfono senta i tap
     python tapzones.py calibrate           # registra le zone (default: sinistra,destra,sotto)
+    python tapzones.py calibrate --gui     # calibrazione guidata in una finestra grafica
     python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 20
     python tapzones.py tray --autostart    # icona nella barra (verde/arancione/rosso) che avvia anche 'run'
                                            # (tasto destro > "Calibra zone..." per ricalibrare senza terminale)
@@ -34,6 +35,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -62,10 +64,8 @@ WEAK = 0.01            # scarta se il picco è troppo basso
 N_BANDS = 24
 ENV_SEGS = 8
 
-
 def rms(x):
     return float(np.sqrt(np.mean(np.square(x)))) if len(x) else 0.0
-
 
 # ---- rilevamento dell'impulso -------------------------------------------
 class Detector:
@@ -140,7 +140,6 @@ class Detector:
             return ("rej", "suono prolungato (voce/rumore?)")
         return ("ok", w)
 
-
 # ---- feature acustiche ---------------------------------------------------
 def features(w, sr):
     """w: array (campioni, canali). Vettore di feature indipendente dal volume."""
@@ -184,7 +183,6 @@ def features(w, sr):
         feats += [[ild, bl / M], coarse]
     return np.concatenate([np.asarray(f, dtype=float).ravel() for f in feats])
 
-
 # ---- classificatore: LDA regolarizzata + rifiuto dei casi dubbi -----------
 class Model:
     def fit(self, X, y):
@@ -221,7 +219,6 @@ class Model:
             return None, conf, "ambiguo tra zone"
         return b, conf, ""
 
-
 def leave_one_out(X, y):
     X, y = np.asarray(X, float), np.asarray(y, int)
     preds, own = [], []
@@ -232,7 +229,6 @@ def leave_one_out(X, y):
         preds.append(int(np.argmin(d)))
         own.append(d[y[i]])
     return np.array(preds), np.array(own)
-
 
 # ---- audio ---------------------------------------------------------------
 class Listener:
@@ -312,20 +308,17 @@ class Listener:
         for _ in self.events(stop=lambda: time.time() > end):
             pass
 
-
 def pick_device(device):
     import sounddevice as sd
     info = sd.query_devices(device, "input")
     ch = 2 if info["max_input_channels"] >= 2 else 1
     return int(info["default_samplerate"]), ch, info["name"]
 
-
 def device_identity(index):
     """Nome + driver (host API) del dispositivo: stabili anche se gli indici cambiano."""
     import sounddevice as sd
     d = sd.query_devices(index, "input")
     return d["name"], sd.query_hostapis(d["hostapi"])["name"]
-
 
 def resolve_device(index, name, api):
     """Ritrova il microfono per nome+driver; se non c'è, ripiega sull'indice salvato."""
@@ -339,13 +332,11 @@ def resolve_device(index, name, api):
                  "Controlla con 'python tapzones.py devices'.")
     return index
 
-
 def cmd_devices(args):
     import sounddevice as sd
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
             print(f"[{i}] {d['name']}  ({d['max_input_channels']} canali, {int(d['default_samplerate'])} Hz)")
-
 
 def cmd_meter(args):
     sr, ch, name = pick_device(args.device)
@@ -373,91 +364,709 @@ def cmd_meter(args):
     elif top < 0.01:
         print("Livello molto basso: alza il volume di ingresso in Windows o prova un altro dispositivo.")
 
+# ---- schermata ASCII per la calibrazione (fallback) ----------------------
+# Tutto passa da Screen.draw, che riduce ogni riga a ASCII puro: la schermata
+# resta identica su qualsiasi console (anche con code page tipo cp1252/cp850).
+W = 46                    # larghezza interna della cornice
+BAR = 20                  # lunghezza barre
+CELL = 12                 # larghezza dell'etichetta di una zona nel disegno del PC
+PAD = CELL + 3            # spazio a sinistra del PC: etichetta + onda
+LAPTOP = [".-------------.",
+          "|             |",
+          "|     PC      |",
+          "|             |",
+          "'-------------'"]
+SIDE_BY_NAME = {"sinistra": "L", "left": "L", "destra": "R", "right": "R",
+                "sotto": "B", "davanti": "B", "bottom": "B", "front": "B",
+                "sopra": "T", "dietro": "T", "top": "T", "back": "T"}
 
-# ---- calibrazione --------------------------------------------------------
-def collect_zone(L, sr, name, n):
-    out, got = [], 0
-    input(f"\nZona «{name}»: premi INVIO, poi tocca {n} volte quell'area (variando un po' il punto). ")
-    L.flush(0.7)
-    for kind, data in L.events(stop=lambda: got >= n):
-        if kind == "rej":
-            print(f"   ✗ scartato: {data}")
-            continue
-        out.append(features(data, sr))
-        got += 1
-        print(f"   ✓ {got}/{n}")
-    return out
+def to_ascii(s):
+    """Toglie accenti e simboli non ASCII: l'output della schermata resta sempre ASCII."""
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")
+    return "".join(c if " " <= c < "\x7f" else " " for c in s)
 
+def bar(v, tot, width=BAR):
+    k = 0 if tot <= 0 else min(width, int(width * v / tot))
+    return "#" * k + "." * (width - k)
 
-def ask_samples():
-    """Chiede quanti tocchi registrare per ogni zona (10, 20 o 50)."""
-    print("\nQuanti tocchi per zona vuoi registrare?")
-    print("  10 = veloce, va bene in un ambiente silenzioso")
-    print("  20 = consigliato")
-    print("  50 = più robusto (rumore o musica in sottofondo), ma richiede più tempo")
-    while True:
+class Screen:
+    """Schermata ASCII minimale. Niente loop di refresh: ridisegna (un solo write) solo quando cambia qualcosa."""
+
+    def __init__(self, compact=False):
+        self.vt = self._enable_vt()
+        if compact and sys.platform == "win32":
+            os.system(f"mode con: cols={W + 4} lines=26")      # finestra piccola (console classica)
+        if self.vt:
+            sys.stdout.write("\x1b[2J")
+
+    @staticmethod
+    def _enable_vt():
+        if sys.platform != "win32":
+            return True
         try:
-            ans = input("Scegli 10, 20 o 50 [INVIO = 20]: ").strip()
+            import ctypes
+            k = ctypes.windll.kernel32
+            h = k.GetStdHandle(-11)
+            m = ctypes.c_ulong()
+            if not k.GetConsoleMode(h, ctypes.byref(m)):
+                return False
+            return bool(k.SetConsoleMode(h, m.value | 0x0004))   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        except Exception:
+            return False
+
+    def draw(self, rows):
+        edge = "+" + "=" * W + "+"
+        mid = "+" + "-" * W + "+"
+        out = [edge]
+        for r in rows:
+            out.append(mid if r == "-" else "|" + to_ascii(" " + r)[:W].ljust(W) + "|")
+        out.append(edge)
+        txt = "\n".join(out)
+        if self.vt:
+            sys.stdout.write("\x1b[H" + txt.replace("\n", "\x1b[K\n") + "\x1b[K\n\x1b[J")
+        else:
+            os.system("cls" if sys.platform == "win32" else "clear")
+            sys.stdout.write(txt + "\n")
+        sys.stdout.flush()
+
+def place_zones(names):
+    """Lato del PC per ogni zona: {'L'|'R'|'T'|'B': indice}. None se le zone sono piu' di 4 (resta solo l'elenco)."""
+    if len(names) > 4:
+        return None
+    slots = {}
+    for i, nm in enumerate(names):
+        s = SIDE_BY_NAME.get(nm.strip().lower())
+        if s and s not in slots:
+            slots[s] = i
+    free = [s for s in "LRBT" if s not in slots]
+    for i in range(len(names)):
+        if i not in slots.values():
+            slots[free.pop(0)] = i
+    return slots
+
+def _cell(i, names, counts, n, cur):
+    nm = names[i][:8]
+    if counts[i] >= n:
+        s = f"[{nm}]"            # completata
+    elif i == cur:
+        s = f"*{nm}*"             # da toccare adesso
+    else:
+        s = nm
+    return s.center(CELL)
+
+def diagram_rows(names, counts, n, cur, slots):
+    """Il PC visto dall'alto con le zone attorno; la zona in corso 'manda' onde che crescono a ogni tocco."""
+    def label(side):
+        i = slots.get(side)
+        return " " * CELL if i is None else _cell(i, names, counts, n, cur)
+
+    def wave(side):
+        i = slots.get(side)
+        if i is None or i != cur or counts[i] >= n:
+            return "   "
+        k = counts[i] % 3 + 1
+        if side == "L":
+            return (">" * k).rjust(3)
+        if side == "R":
+            return ("<" * k).ljust(3)
+        return " ".join("v" if side == "T" else "^" for _ in range(k))
+
+    full = PAD + len(LAPTOP[0]) + 3 + CELL          # = W - 1
+    rows = []
+    if "T" in slots:
+        rows += [label("T").strip().center(full), wave("T").center(full)]
+    for r, line in enumerate(LAPTOP):
+        if r == 2:
+            rows.append(label("L") + wave("L") + line + wave("R") + label("R"))
+        else:
+            rows.append(" " * PAD + line)
+    if "B" in slots:
+        rows += [wave("B").center(full), label("B").strip().center(full)]
+    return rows
+
+def zone_rows(names, counts, n, cur):
+    rows = []
+    for i, nm in enumerate(names):
+        c = counts[i]
+        tag = "OK" if c >= n else (f"{c}/{n}" if i == cur else "")
+        rows.append(f"{'>' if i == cur else ' '} {i + 1} {nm[:10]:<10} [{bar(c, n)}] {tag}")
+    return rows
+
+def ask_samples(ui):
+    """Chiede quanti tocchi registrare per ogni zona (10, 20 o 50)."""
+    msg = ""
+    while True:
+        ui.draw(["TAPZONES - calibrazione", "-",
+                 "Quanti tocchi per zona?", "",
+                 "  [10]  veloce      (ambiente silenzioso)",
+                 "  [20]  consigliato (premi solo INVIO)",
+                 "  [50]  robusto     (rumore o musica)", "-",
+                 msg or "Scrivi 10, 20 o 50 e premi INVIO"])
+        try:
+            ans = input("  > ").strip()
         except EOFError:
             return 20
         if not ans:
             return 20
         if ans in ("10", "20", "50"):
             return int(ans)
-        print("Scelta non valida.")
+        msg = "Scelta non valida: 10, 20 o 50"
 
+def collect_zone(L, sr, i, name, n, counts, show):
+    out = []
+    counts[i] = 0
+    show(i, f'Zona "{name}": premi INVIO', f"poi tocca {n} volte (varia il punto)")
+    input("  > ")
+    L.flush(0.7)
+    msg = f'Tocca la zona "{name}"'
+    show(i, msg, "")
+    for kind, data in L.events(stop=lambda: len(out) >= n):
+        if kind == "rej":
+            show(i, msg, "scartato: " + data)
+            continue
+        out.append(features(data, sr))
+        counts[i] = len(out)
+        show(i, msg, f"ok - tocco {len(out)}/{n}")
+    return out
+
+def calibration_device(args):
+    """--device se c'e'; altrimenti il microfono salvato in profile.json (ritrovato per nome+driver); altrimenti None."""
+    if args.device is not None:
+        return args.device
+    try:
+        prof = json.loads(PROFILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    dev = prof.get("device")
+    if prof.get("device_name"):
+        dev = resolve_device(dev, prof["device_name"], prof.get("device_api"))
+    return dev
 
 def cmd_calibrate(args):
+    if getattr(args, "gui", False):
+        return gui_calibrate(args)
     names = [z.strip() for z in args.zones.split(",") if z.strip()]
     if len(names) < 2:
         sys.exit("Servono almeno 2 zone.")
+    args.device = calibration_device(args)
+    ui = Screen(compact=getattr(args, "hold", False))
     if args.samples is None:
-        args.samples = ask_samples()
+        args.samples = ask_samples(ui)
+    n, k = args.samples, len(names)
     sr, ch, dev_name = pick_device(args.device)
-    print(f"Microfono: {dev_name} | {ch} canale/i | {sr} Hz")
-    print("Tieni il PC fermo nella posizione in cui lo userai. Spostarlo invalida la calibrazione.")
+    counts = [0] * k
+    slots = place_zones(names)
+
+    def show(cur, l1="", l2=""):
+        done = sum(min(c, n) for c in counts)
+        rows = ["TAPZONES - calibrazione", f"mic: {dev_name}"[:W - 1],
+                f"totale [{bar(done, n * k)}] {done}/{n * k}", "-"]
+        if slots:
+            rows += diagram_rows(names, counts, n, cur, slots) + ["-"]
+        ui.draw(rows + zone_rows(names, counts, n, cur) + ["-", l1, l2])
+
     samples = {}
     with Listener(sr, ch, args.device, args.sensitivity, args.gain) as L:
-        print("Imparo il rumore ambiente, silenzio per un attimo...")
+        show(-1, "Imparo il rumore ambiente...", "Silenzio e PC fermo un attimo")
         L.settle(1.5)
         for i, name in enumerate(names):
-            samples[i] = collect_zone(L, sr, name, args.samples)
+            samples[i] = collect_zone(L, sr, i, name, n, counts, show)
         while True:
-            X = np.array([f for i in range(len(names)) for f in samples[i]])
-            y = np.array([i for i in range(len(names)) for _ in samples[i]])
+            X = np.array([f for i in range(k) for f in samples[i]])
+            y = np.array([i for i in range(k) for _ in samples[i]])
+            show(-1, "Calcolo coerenza...", "")
             preds, own = leave_one_out(X, y)
-            print("\n=== Controllo di coerenza (leave-one-out) ===")
-            print(f"Accuratezza stimata: {np.mean(preds == y) * 100:.0f}%")
-            print("Matrice di confusione (righe = zona vera, colonne = riconosciuta):")
-            print("            " + " ".join(f"{n[:9]:>9}" for n in names))
-            worst, worst_acc = 0, 2.0
-            for i, n in enumerate(names):
-                row = [int(np.sum((y == i) & (preds == j))) for j in range(len(names))]
-                acc = row[i] / max(1, sum(row))
-                if acc < worst_acc:
-                    worst, worst_acc = i, acc
-                print(f"{n[:11]:>11} " + " ".join(f"{v:>9}" for v in row) + f"   {acc * 100:.0f}%")
-            if worst_acc < 0.8:
-                print(f"\nLa zona più debole è «{names[worst]}» ({worst_acc * 100:.0f}%).")
-            ans = input("Rifare una zona? Scrivi il suo nome, oppure INVIO per salvare: ").strip()
+            acc = [float(np.mean(preds[y == i] == i)) for i in range(k)]
+            w = int(np.argmin(acc))
+            hint = "Zone ben separate"
+            if acc[w] < 0.8:
+                wrong = preds[y == w]
+                wrong = wrong[wrong != w]
+                if len(wrong):
+                    hint = f'"{names[w]}" si confonde con "{names[int(np.bincount(wrong).argmax())]}"'
+            rows = ["TAPZONES - risultato", "-"]
+            for i, nm in enumerate(names):
+                flag = "+" if acc[i] >= 0.9 else ("~" if acc[i] >= 0.8 else "!")
+                rows.append(f"  {i + 1} {nm[:10]:<10} [{bar(acc[i], 1)}] {acc[i] * 100:3.0f}% {flag}")
+            M = np.zeros((k, k), int)
+            np.add.at(M, (y, preds), 1)
+            rows += ["-", f"Accuratezza stimata: {np.mean(preds == y) * 100:.0f}%", hint,
+                     "+ ottima   ~ buona   ! da rifare"]
+            if k <= 5:
+                rows += ["-", "Scambi (riga = tocco vero, colonna = letto)",
+                         " " * 14 + "".join(f"{j + 1:>4}" for j in range(k))]
+                rows += [f"  {i + 1} {nm[:10]:<10}" + "".join(f"{M[i, j]:>4}" for j in range(k))
+                         for i, nm in enumerate(names)]
+            rows += ["-", "N. zona = rifai | INVIO = salva"]
+            ui.draw(rows)
+            ans = input("  > ").strip()
             if not ans:
                 break
-            if ans in names:
+            if ans.isdigit() and 1 <= int(ans) <= k:
+                i = int(ans) - 1
+            elif ans in names:
                 i = names.index(ans)
-                samples[i] = collect_zone(L, sr, ans, args.samples)
             else:
-                print("Nome non valido.")
+                continue
+            samples[i] = collect_zone(L, sr, i, names[i], n, counts, show)
     ood = float(1.5 * np.percentile(own, 95))
     dname, dapi = device_identity(args.device)
     PROFILE.write_text(json.dumps({"sr": sr, "channels": ch, "device": args.device,
                                    "device_name": dname, "device_api": dapi, "gain": args.gain, "zones": names,
                                    "X": X.tolist(), "y": y.tolist(), "ood": ood}))
-    print(f"\nProfilo salvato in {PROFILE}")
+    msg = ["[OK] Profilo salvato.", ""]
     if not ACTIONS.exists():
-        ACTIONS.write_text(json.dumps({n: {"type": "none", "value": ""} for n in names},
+        ACTIONS.write_text(json.dumps({nm: {"type": "none", "value": ""} for nm in names},
                                       indent=2, ensure_ascii=False))
-        print(f"Creato {ACTIONS}: modificalo per assegnare le azioni, poi lancia: python tapzones.py run")
+        msg = ["[OK] Profilo salvato.", "[OK] Creato actions.json: assegna le azioni."]
+    ui.draw(["TAPZONES - fatto", "-"] + msg)
 
+# ---- calibrazione guidata (tkinter) --------------------------------------
+def gui_calibrate(args):
+    """Calibrazione guidata in una finestra grafica. Fallback automatico al terminale se tkinter manca."""
+    try:
+        import tkinter as tk          # noqa: F401
+    except ImportError:
+        # Con pythonw non c'è stdout: loggo su file, altrimenti il fallback è invisibile.
+        try:
+            with open(HERE / "tapzones-errors.log", "a", encoding="utf-8") as f:
+                f.write("tkinter non disponibile: passo alla calibrazione da terminale\n")
+        except Exception:
+            pass
+        print("tkinter non disponibile: passo alla calibrazione da terminale.")
+        args.gui = False
+        return cmd_calibrate(args)
+
+    names = [z.strip() for z in args.zones.split(",") if z.strip()]
+    if len(names) < 2:
+        sys.exit("Servono almeno 2 zone.")
+    args.device = calibration_device(args)
+    sr, ch, dev_name = pick_device(args.device)
+
+    args._gui_used = True             # serve a main() per non chiedere "Premi INVIO"
+
+    import tkinter as tk
+    root = tk.Tk()
+    root.title("TapZones - Calibrazione")
+    root.resizable(False, False)
+    CalibrationWindow(root, names, sr, ch, dev_name, args)
+    root.mainloop()
+
+class CalibrationWindow:
+    """Finestra di calibrazione: PC al centro, zone intorno, click per rifare."""
+
+    LAPTOP_W, LAPTOP_H = 200, 120
+    ZONE_W, ZONE_H = 132, 64
+
+    # Palette chiara, sobria
+    BG             = "#f4f4f6"
+    PANEL          = "#ffffff"
+    LAPTOP_FILL    = "#d8d8de"
+    LAPTOP_EDGE    = "#a0a0ac"
+    LAPTOP_SCREEN  = "#ececf0"
+    TEXT           = "#18181b"
+    TEXT_DIM       = "#71717a"
+    ZONE_IDLE      = "#e8e8ec"
+    ZONE_IDLE_EDGE = "#a0a0ac"
+    ZONE_ACTIVE    = "#5b5bd6"
+    ZONE_ACTIVE_ED = "#4343b8"
+    ZONE_DONE      = "#10b981"
+    ZONE_DONE_ED   = "#059669"
+    ZONE_WARN      = "#f59e0b"
+    ZONE_WARN_ED   = "#d97706"
+    ZONE_BAD       = "#ef4444"
+    ZONE_BAD_ED    = "#dc2626"
+    ZONE_TEXT      = "#18181b"
+    ZONE_TEXT_ON   = "#ffffff"
+    PULSE          = "#6366f1"
+    OK             = "#16a34a"
+    REJECT         = "#ef4444"
+
+    def __init__(self, root, names, sr, ch, dev_name, args):
+        import tkinter as tk
+        import threading as _t
+        self._threading = _t
+        self.tk = tk
+        self.root = root
+        self.names = names
+        self.sr, self.ch = sr, ch
+        self.dev_name = dev_name
+        self.args = args
+        self.k = len(names)
+        self.n = args.samples if args.samples else 20
+
+        self.samples = {i: [] for i in range(self.k)}
+        self.counts  = [0] * self.k
+        self.acc     = None
+        self.active  = None
+        self.started = False
+        self.done_all = False
+
+        self.event_queue = queue.Queue()
+        self.stop_flag   = self._threading.Event()
+        self.L           = None
+        self.worker      = None
+
+        self.zone_pos     = self._assign_positions()
+        self.zone_items   = {}
+        self.zone_centers = {}
+        self.pulses       = []
+
+        self._build_ui()
+        self._draw_canvas()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(30, self._tick)
+
+    # -- layout -----------------------------------------------------------
+    def _assign_positions(self):
+        used, pos = set(), {}
+        for i, nm in enumerate(self.names):
+            s = SIDE_BY_NAME.get(nm.strip().lower())
+            if s and s not in used:
+                pos[i] = s
+                used.add(s)
+        for i in range(self.k):
+            if i not in pos:
+                for s in "LRBT":
+                    if s not in used:
+                        pos[i] = s
+                        used.add(s)
+                        break
+        return pos
+
+    def _compute_layout(self):
+        W = 660
+        cx, cy = W // 2, 230
+        slots = {"L": (100, cy), "R": (W - 100, cy),
+                 "T": (cx, 90),  "B": (cx, 370)}
+        centers = {i: slots[s] for i, s in self.zone_pos.items()}
+        extras = [i for i in range(self.k) if i not in centers]
+        H = 460
+        if extras:
+            rows = (len(extras) + 3) // 4
+            H = 480 + rows * 90
+            for j, i in enumerate(extras):
+                row, col = divmod(j, 4)
+                centers[i] = (100 + col * 150, 480 + row * 90)
+        return W, H, (cx, cy), centers
+
+    # -- costruzione UI ---------------------------------------------------
+    def _build_ui(self):
+        tk = self.tk
+        self.root.configure(bg=self.BG)
+
+        top = tk.Frame(self.root, bg=self.BG, padx=16, pady=12)
+        top.pack(fill="x")
+        tk.Label(top, text="TapZones - Calibrazione",
+                 font=("Segoe UI", 14, "bold"), bg=self.BG, fg=self.TEXT).pack(side="left")
+        tk.Label(top, text=f"Mic: {self.dev_name[:40]}",
+                 font=("Segoe UI", 9), bg=self.BG, fg=self.TEXT_DIM).pack(side="right")
+
+        ctr = tk.Frame(self.root, bg=self.BG, padx=16)
+        ctr.pack(fill="x")
+        tk.Label(ctr, text="Tocchi per zona:", font=("Segoe UI", 10),
+                 bg=self.BG, fg=self.TEXT).pack(side="left", padx=(0, 8))
+        self.samples_var = tk.IntVar(value=self.n)
+        self.radio_btns = []
+        for val in (10, 20, 50):
+            rb = tk.Radiobutton(ctr, text=str(val), variable=self.samples_var, value=val,
+                                font=("Segoe UI", 10), bg=self.BG, fg=self.TEXT,
+                                activebackground=self.BG, selectcolor=self.PANEL,
+                                highlightthickness=0, bd=0)
+            rb.pack(side="left", padx=4)
+            self.radio_btns.append(rb)
+        self.start_btn = tk.Button(ctr, text="Inizia", command=self._on_start,
+                                   font=("Segoe UI", 10, "bold"),
+                                   bg=self.ZONE_ACTIVE, fg="white",
+                                   activebackground=self.ZONE_ACTIVE_ED,
+                                   activeforeground="white",
+                                   relief="flat", padx=20, pady=4, cursor="hand2", borderwidth=0)
+        self.start_btn.pack(side="right")
+
+        W, H, laptop, centers = self._compute_layout()
+        self.canvas = tk.Canvas(self.root, width=W, height=H, bg=self.BG,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.laptop_center = laptop
+        self.zone_centers  = centers
+
+        bot = tk.Frame(self.root, bg=self.BG, padx=16, pady=10)
+        bot.pack(fill="x")
+        self.status_lbl = tk.Label(bot, text="Scegli i tocchi e premi Inizia.",
+                                   font=("Segoe UI", 10), bg=self.BG, fg=self.TEXT_DIM,
+                                   anchor="w", justify="left")
+        self.status_lbl.pack(side="left", fill="x", expand=True)
+        self.save_btn = tk.Button(bot, text="Salva", command=self._on_save,
+                                  font=("Segoe UI", 10, "bold"),
+                                  bg=self.ZONE_DONE, fg="white",
+                                  activebackground=self.ZONE_DONE_ED, activeforeground="white",
+                                  relief="flat", padx=20, pady=4, cursor="hand2",
+                                  borderwidth=0, state="disabled")
+        self.save_btn.pack(side="right")
+
+    def _draw_canvas(self):
+        c = self.canvas
+        lx, ly = self.laptop_center
+        lw, lh = self.LAPTOP_W, self.LAPTOP_H
+        c.create_rectangle(lx - lw / 2, ly - lh / 2, lx + lw / 2, ly + lh / 2,
+                           fill=self.LAPTOP_FILL, outline=self.LAPTOP_EDGE, width=2)
+        m = 14
+        c.create_rectangle(lx - lw / 2 + m, ly - lh / 2 + m, lx + lw / 2 - m, ly + lh / 2 - m,
+                           fill=self.LAPTOP_SCREEN, outline=self.LAPTOP_EDGE, width=1)
+        c.create_text(lx, ly, text="PC", font=("Segoe UI", 16, "bold"), fill=self.TEXT_DIM)
+
+        for i in range(self.k):
+            cx, cy = self.zone_centers[i]
+            zw, zh = self.ZONE_W, self.ZONE_H
+            x1, y1, x2, y2 = cx - zw / 2, cy - zh / 2, cx + zw / 2, cy + zh / 2
+            r = 10
+            pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+                   x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+                   x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+            tag = f"zone_{i}"
+            rect = c.create_polygon(pts, smooth=True, fill=self.ZONE_IDLE,
+                                    outline=self.ZONE_IDLE_EDGE, width=2, tags=(tag,))
+            txt = c.create_text(cx, cy - 7, text=self.names[i][:14],
+                                font=("Segoe UI", 11, "bold"),
+                                fill=self.ZONE_TEXT, tags=(tag,))
+            cnt = c.create_text(cx, cy + 14, text=f"0/{self.n}",
+                                font=("Segoe UI", 9), fill=self.TEXT_DIM, tags=(tag,))
+            self.zone_items[i] = {"rect": rect, "text": txt, "count": cnt}
+            c.tag_bind(tag, "<Button-1>", lambda e, idx=i: self._on_zone_click(idx))
+            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+
+    # -- stile / redraw ---------------------------------------------------
+    def _zone_style(self, i):
+        if self.acc is not None and self.counts[i] >= self.n:
+            a = self.acc[i]
+            if a >= 0.9:   return self.ZONE_DONE, self.ZONE_DONE_ED, self.ZONE_TEXT_ON
+            if a >= 0.8:   return self.ZONE_WARN, self.ZONE_WARN_ED, self.ZONE_TEXT_ON
+            return              self.ZONE_BAD,  self.ZONE_BAD_ED,  self.ZONE_TEXT_ON
+        if i == self.active:
+            return self.ZONE_ACTIVE, self.ZONE_ACTIVE_ED, self.ZONE_TEXT_ON
+        if self.counts[i] >= self.n:
+            return self.ZONE_DONE, self.ZONE_DONE_ED, self.ZONE_TEXT_ON
+        return self.ZONE_IDLE, self.ZONE_IDLE_EDGE, self.ZONE_TEXT
+
+    def _redraw_zone(self, i):
+        fill, edge, tf = self._zone_style(i)
+        it = self.zone_items[i]
+        self.canvas.itemconfig(it["rect"], fill=fill, outline=edge)
+        self.canvas.itemconfig(it["text"], fill=tf)
+        t = f"{self.counts[i]}/{self.n}"
+        if self.acc is not None and self.counts[i] >= self.n:
+            t += f"  ({self.acc[i] * 100:.0f}%)"
+        self.canvas.itemconfig(it["count"], text=t,
+                               fill=tf if fill != self.ZONE_IDLE else self.TEXT_DIM)
+
+    def _redraw_all(self):
+        for i in range(self.k):
+            self._redraw_zone(i)
+
+    # -- flusso di calibrazione ------------------------------------------
+    def _on_start(self):
+        if self.started:
+            return
+        self.n = self.samples_var.get()
+        self.started = True
+        for rb in self.radio_btns:
+            rb.configure(state="disabled")
+        self.start_btn.configure(state="disabled", bg="#a0a0ac")
+        if not self._start_audio():
+            self.started = False
+            self.start_btn.configure(state="normal", bg=self.ZONE_ACTIVE)
+            for rb in self.radio_btns:
+                rb.configure(state="normal")
+            return
+        self._set_active(self._next_pending())
+        self._redraw_all()
+        if self.active is not None:
+            self._set_status(f"Tocca '{self.names[self.active]}' {self.n} volte (varia un po').")
+
+    def _next_pending(self):
+        for i in range(self.k):
+            if self.counts[i] < self.n:
+                return i
+        return None
+
+    def _set_active(self, i):
+        old = self.active
+        if old is not None and old != i:
+            self.canvas.itemconfig(self.zone_items[old]["rect"], width=2)
+        self.active = i
+
+    def _start_audio(self):
+        try:
+            self.L = Listener(self.sr, self.ch, self.args.device,
+                              self.args.sensitivity, self.args.gain)
+            self.L.open()
+        except Exception as e:
+            self._set_status(f"Errore microfono: {e}", error=True)
+            return False
+        self.worker = self._threading.Thread(target=self._audio_loop, daemon=True)
+        self.worker.start()
+        self._set_status("Imparo il rumore ambiente... 2 secondi di silenzio.")
+        return True
+
+    def _audio_loop(self):
+        # Precalcolo le feature nel thread audio: la UI resta reattiva.
+        try:
+            self.L.settle(1.5)
+        except Exception:
+            pass
+        while not self.stop_flag.is_set():
+            try:
+                for kind, data in self.L.events(stop=lambda: self.stop_flag.is_set()):
+                    if kind == "ok":
+                        try:
+                            self.event_queue.put(("ok", features(data, self.sr)))
+                        except Exception:
+                            pass
+                    else:
+                        self.event_queue.put(("rej", data))
+            except Exception:
+                break
+
+    def _tick(self):
+        try:
+            while True:
+                kind, data = self.event_queue.get_nowait()
+                self._handle_event(kind, data)
+        except queue.Empty:
+            pass
+        self._animate_pulses()
+        self._animate_active()
+        self.root.after(30, self._tick)
+
+    def _handle_event(self, kind, data):
+        if kind == "rej":
+            self._set_status(f"Scartato: {data}", dim=True)
+            return
+        if self.active is None:
+            return
+        i = self.active
+        self.samples[i].append(data)
+        self.counts[i] += 1
+        self._redraw_zone(i)
+        self._start_pulse(i)
+        if self.counts[i] >= self.n:
+            nxt = self._next_pending()
+            self._set_active(nxt)
+            if nxt is None:
+                self._finish_all()
+            else:
+                self._set_status(f"Zona '{self.names[i]}' ok. Ora tocca '{self.names[nxt]}'.")
+                self._redraw_zone(nxt)
+
+    def _finish_all(self):
+        X = np.array([f for i in range(self.k) for f in self.samples[i]])
+        y = np.array([i for i in range(self.k) for _ in self.samples[i]])
+        preds, own = leave_one_out(X, y)
+        self.acc = [float(np.mean(preds[y == i] == i)) for i in range(self.k)]
+        self._redraw_all()
+        overall = float(np.mean(preds == y))
+        msg = f"Fine. Accuratezza stimata: {overall * 100:.0f}%."
+        worst = int(np.argmin(self.acc))
+        if self.acc[worst] < 0.8:
+            wrong = preds[y == worst]
+            wrong = wrong[wrong != worst]
+            if len(wrong):
+                other = self.names[int(np.bincount(wrong).argmax())]
+                msg += f"  '{self.names[worst]}' si confonde con '{other}' - clicca la zona per rifarla."
+        self._set_status(msg, ok=(overall >= 0.85))
+        self._X, self._y, self._own = X, y, own
+        self.done_all = True
+        self.save_btn.configure(state="normal")
+
+    def _on_zone_click(self, i):
+        if not self.started:
+            return
+        self.samples[i] = []
+        self.counts[i] = 0
+        self.acc = None
+        self.done_all = False
+        self.save_btn.configure(state="disabled")
+        try:
+            while True:
+                self.event_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if self.L is not None:
+            try:
+                self.L.flush(0.4)
+            except Exception:
+                pass
+        self._set_active(i)
+        self._redraw_all()
+        self._set_status(f"Rifai '{self.names[i]}': tocca {self.n} volte.")
+
+    def _on_save(self):
+        if not self.done_all:
+            return
+        ood = float(1.5 * np.percentile(self._own, 95))
+        dname, dapi = device_identity(self.args.device)
+        PROFILE.write_text(json.dumps({
+            "sr": self.sr, "channels": self.ch, "device": self.args.device,
+            "device_name": dname, "device_api": dapi,
+            "gain": self.args.gain, "zones": self.names,
+            "X": self._X.tolist(), "y": self._y.tolist(), "ood": ood,
+        }))
+        if not ACTIONS.exists():
+            ACTIONS.write_text(json.dumps(
+                {nm: {"type": "none", "value": ""} for nm in self.names},
+                indent=2, ensure_ascii=False))
+        self._set_status("[OK] Profilo salvato.", ok=True)
+        self.root.after(700, self._on_close)
+
+    # -- animazioni --------------------------------------------------------
+    def _start_pulse(self, i):
+        x, y = self.zone_centers[i]
+        item = self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8,
+                                       outline=self.PULSE, width=4, fill="")
+        self.pulses.append({"item": item, "t0": time.time(), "x": x, "y": y})
+
+    def _animate_pulses(self):
+        if not self.pulses:
+            return
+        now = time.time()
+        alive = []
+        for p in self.pulses:
+            dt = now - p["t0"]
+            if dt > 0.55:
+                self.canvas.delete(p["item"])
+                continue
+            k = dt / 0.55
+            r = 10 + k * 70
+            self.canvas.coords(p["item"], p["x"] - r, p["y"] - r, p["x"] + r, p["y"] + r)
+            w = max(1, int(round(4 * (1 - k))))
+            self.canvas.itemconfig(p["item"], width=w)
+            alive.append(p)
+        self.pulses = alive
+
+    def _animate_active(self):
+        if self.active is None:
+            return
+        # leggero pulsare del bordo della zona attiva
+        w = 2 + int(round(1.5 + 1.5 * math.sin(time.time() * 4)))
+        self.canvas.itemconfig(self.zone_items[self.active]["rect"], width=w)
+
+    # -- utility ----------------------------------------------------------
+    def _set_status(self, text, error=False, ok=False, dim=False):
+        color = self.TEXT_DIM if dim else (self.REJECT if error else (self.OK if ok else self.TEXT))
+        self.status_lbl.configure(text=text, fg=color)
+
+    def _on_close(self):
+        self.stop_flag.set()
+        if self.L is not None:
+            try:
+                self.L.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 # ---- esecuzione ----------------------------------------------------------
 def do_action(a):
@@ -474,7 +1083,6 @@ def do_action(a):
             return
         pyautogui.hotkey(*[k.strip() for k in v.split("+")])
 
-
 def profile_device(prof, args):
     dev = args.device if args.device is not None else prof.get("device")
     if args.device is None and prof.get("device_name"):
@@ -485,7 +1093,6 @@ def profile_device(prof, args):
         PROFILE.write_text(json.dumps(prof))
         print(f"Microfono fissato nel profilo: {prof['device_name']} ({prof['device_api']})")
     return dev
-
 
 def collect_negatives(L, sr, n=20, max_s=40):
     """Raccoglie i suoni che superano il filtro ma NON sono tap (voce, tasti, tosse...)."""
@@ -498,7 +1105,6 @@ def collect_negatives(L, sr, n=20, max_s=40):
             out.append(features(data, sr))
             print(f"   + esempio negativo {len(out)}/{n}")
     return out
-
 
 def cmd_negatives(args):
     if not PROFILE.exists():
@@ -527,10 +1133,8 @@ def cmd_negatives(args):
     PROFILE.write_text(json.dumps(prof))
     print("Profilo aggiornato. Ora i suoni simili ai negativi vengono ignorati da 'run'.")
 
-
 _CUR_STATE = None        # ultimo stato scritto da questo processo
 _LAST_EVENT = None       # ultimo tap visto da 'run' (l'icona lo mostra con un lampeggio)
-
 
 def write_status(state, reason=""):
     global _CUR_STATE
@@ -542,7 +1146,6 @@ def write_status(state, reason=""):
     tmp.write_text(json.dumps(d, ensure_ascii=False))
     os.replace(tmp, STATUS)
 
-
 def note_event(kind, text):
     """Registra l'ultimo tap in status.json. kind: 'ok' (azione eseguita) o 'rej' (rifiutato/ignorato)."""
     global _LAST_EVENT
@@ -552,7 +1155,6 @@ def note_event(kind, text):
     _LAST_EVENT = {"kind": kind, "text": text, "ts": now}
     if _CUR_STATE:
         write_status(*_CUR_STATE)
-
 
 def pid_alive(pid):
     """True se il processo con questo PID esiste ancora."""
@@ -578,7 +1180,6 @@ def pid_alive(pid):
     except OSError:
         return False
 
-
 def read_status():
     """Stato di 'run' se è vivo, altrimenti None (il file viene scritto solo ai cambi di stato)."""
     if not STATUS.exists():
@@ -596,13 +1197,11 @@ def read_status():
         return None
     return d
 
-
 def toggle_pause_flag():
     if PAUSE_FLAG.exists():
         PAUSE_FLAG.unlink()
     else:
         PAUSE_FLAG.write_text("1")
-
 
 def foreground_title():
     """Titolo della finestra in primo piano (solo Windows)."""
@@ -615,7 +1214,6 @@ def foreground_title():
     buf = ctypes.create_unicode_buffer(n + 1)
     u.GetWindowTextW(h, buf, n + 1)
     return buf.value
-
 
 def start_hotkey(toggle):
     """Scorciatoia globale Ctrl+Alt+P: pausa/riprendi manuale (solo Windows)."""
@@ -638,7 +1236,6 @@ def start_hotkey(toggle):
 
     threading.Thread(target=loop, daemon=True).start()
     return True
-
 
 def cmd_run(args):
     if not PROFILE.exists():
@@ -848,7 +1445,6 @@ def cmd_run(args):
         except Exception:
             pass
 
-
 def calibrate_args(extra):
     """Argomenti per 'calibrate' lanciato dall'icona.
 
@@ -881,7 +1477,6 @@ def calibrate_args(extra):
         keep += ["--zones", ",".join(prof["zones"])]
     return keep
 
-
 def cmd_tray(args, extra):
     try:
         import pystray
@@ -890,7 +1485,7 @@ def cmd_tray(args, extra):
         sys.exit("Servono due pacchetti: pip install pystray pillow")
     import threading
     colors = {"green": (34, 197, 94), "orange": (245, 158, 11), "red": (239, 68, 68),
-              "blue": (59, 130, 246), "gray": (148, 163, 184)}     # blu/grigio = lampeggio: tap riconosciuto/rifiutato
+              "blue": (59, 130, 246), "gray": (148, 163, 184)}
     FLASH_S = 0.6
 
     def make(rgb):
@@ -899,8 +1494,14 @@ def cmd_tray(args, extra):
         return im
 
     imgs = {k: make(v) for k, v in colors.items()}
-
     calib = {"on": False}
+
+    def has_tk():
+        try:
+            import tkinter  # noqa: F401
+            return True
+        except Exception:
+            return False
 
     def state():
         if calib["on"]:
@@ -953,16 +1554,8 @@ def cmd_tray(args, extra):
     alive = {"v": True}
 
     def calibrate(icon=None, item=None):
-        """Ferma 'run', apre la calibrazione in una finestra di terminale, poi riavvia 'run'."""
+        """Ferma 'run', apre la calibrazione (GUI se tkinter c'è), poi riavvia 'run'."""
         if calib["on"]:
-            return
-        if sys.platform != "win32":
-            msg = "Dal menu la calibrazione e' disponibile solo su Windows: usa 'python tapzones.py calibrate'"
-            print(msg, file=sys.stderr)
-            try:
-                icon.notify(msg, "TapZones")
-            except Exception:
-                pass
             return
         calib["on"] = True
 
@@ -972,18 +1565,35 @@ def cmd_tray(args, extra):
                 if was_running:
                     stop()                  # il microfono deve essere libero
                     time.sleep(0.5)
+
                 exe = Path(sys.executable)
-                if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
-                    exe = exe.parent / "python.exe"      # pythonw non ha console: serve python.exe
-                cmd = [str(exe), str(Path(__file__).resolve()), "calibrate", *calibrate_args(extra), "--hold"]
-                subprocess.Popen(cmd, cwd=str(HERE), creationflags=0x00000010).wait()   # CREATE_NEW_CONSOLE
+                gui_ok = has_tk()
+                flags = 0
+                tail = []
+                if gui_ok:
+                    # Modalità GUI: nessuna finestra di console.
+                    # Su Windows uso pythonw.exe (mai console); altrove è indifferente.
+                    if sys.platform == "win32":
+                        if exe.name.lower() == "python.exe" and (exe.parent / "pythonw.exe").exists():
+                            exe = exe.parent / "pythonw.exe"
+                    tail = ["--gui"]
+                else:
+                    # Fallback terminale: serve una console vera per l'input/output.
+                    if sys.platform == "win32":
+                        if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+                            exe = exe.parent / "python.exe"
+                        flags = 0x00000010      # CREATE_NEW_CONSOLE
+                    tail = ["--hold"]
+
+                cmd = [str(exe), str(Path(__file__).resolve()), "calibrate", *calibrate_args(extra), *tail]
+                subprocess.Popen(cmd, cwd=str(HERE), creationflags=flags).wait()
             except Exception as e:
                 with open(HERE / "tapzones-errors.log", "a", encoding="utf-8") as f:
                     f.write(f"calibrazione: {e}\n")
             finally:
                 calib["on"] = False
                 if was_running and alive["v"]:
-                    start()                 # riparte con il profilo appena salvato
+                    start()
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1028,7 +1638,6 @@ def cmd_tray(args, extra):
     finally:
         stop()                      # anche con Ctrl+C: non lascia 'run' in giro
 
-
 def main():
     for stream in (sys.stdout, sys.stderr):      # None con pythonw; su file Windows usa spesso cp1252
         if stream is not None and hasattr(stream, "reconfigure"):
@@ -1049,6 +1658,8 @@ def main():
                        help="amplificazione software (se omesso in run: quella della calibrazione)")
         if name == "calibrate":
             s.add_argument("--zones", default="sinistra,destra,sotto")
+            s.add_argument("--gui", action="store_true",
+                           help="calibrazione guidata in una finestra grafica (tkinter)")
             s.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)   # usata dall'icona: finestra aperta a fine lavoro
             s.add_argument("--samples", type=int, default=None,
                            help="tocchi per zona (se omesso te lo chiede: 10, 20 o 50)")
@@ -1089,13 +1700,13 @@ def main():
             import traceback
             traceback.print_exc()
         finally:
-            try:
-                input("\nPremi INVIO per chiudere questa finestra...")
-            except EOFError:
-                pass
+            if not getattr(args, "_gui_used", False):
+                try:
+                    input("\nPremi INVIO per chiudere questa finestra...")
+                except EOFError:
+                    pass
         return
     args.fn(args)
-
 
 if __name__ == "__main__":
     main()
