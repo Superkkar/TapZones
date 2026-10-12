@@ -13,7 +13,7 @@ TapZones usa il microfono del tuo computer per capire **dove** stai battendo sul
 1. **Rilevamento**: il programma impara il rumore di fondo e riconosce un colpo quando il livello sale di colpo e poi decade in fretta. Voce, musica e suoni prolungati vengono scartati.
 2. **Feature**: per ogni colpo calcola alcune caratteristiche acustiche (forma dello spettro, andamento nel tempo e, se il microfono è stereo, le differenze tra i due canali), indipendenti dal volume.
 3. **Classificazione**: un classificatore (LDA regolarizzata) addestrato sui tuoi campioni di calibrazione decide la zona. Se il colpo è dubbio o non assomiglia a nessuna zona, viene rifiutato invece di eseguire un'azione a caso.
-4. **Azione**: viene eseguita l'azione assegnata alla zona.
+4. **Azione**: viene eseguita l'azione assegnata alla zona. Se per quella zona hai definito anche un **doppio tap**, il programma aspetta un attimo un eventuale secondo colpo nella stessa zona.
 
 ## Requisiti
 
@@ -76,9 +76,11 @@ Alla prima calibrazione viene creato `actions.json`. In alternativa parti da `ac
 
 ```json
 {
-  "sinistra": { "type": "url",  "value": "https://www.youtube.com" },
-  "destra":   { "type": "keys", "value": "playpause" },
-  "sotto":    { "type": "run",  "value": "calc.exe" }
+  "sinistra":    { "type": "url",  "value": "https://www.youtube.com" },
+  "sinistra x2": { "type": "url",  "value": "https://claude.ai" },
+  "destra":      { "type": "keys", "value": "playpause" },
+  "destra x2":   { "type": "keys", "value": "nexttrack" },
+  "sotto":       { "type": "run",  "value": "calc.exe" }
 }
 ```
 
@@ -90,6 +92,15 @@ Alla prima calibrazione viene creato `actions.json`. In alternativa parti da `ac
 | `keys` | Preme una scorciatoia (richiede `pyautogui`), es. `ctrl+shift+m`, `volumeup` |
 
 Il file viene riletto automaticamente quando lo modifichi: non serve riavviare `run`.
+
+### Doppio tap
+
+Per assegnare un'azione al doppio tap aggiungi una voce con il nome della zona seguito da ` x2` (vedi `actions.example.json`): `"sinistra x2"` scatta con due tap ravvicinati **nella stessa zona**.
+
+- Se due tap cadono in zone diverse (es. sinistra e poi destra) valgono come due tap singoli.
+- Una zona **senza** voce `x2` non ha nessuna attesa: l'azione singola parte subito. Solo le zone con un doppio tap aspettano `--double-ms` (default 400 ms) prima di eseguire il singolo, per vedere se arriva il secondo colpo.
+- Quando c'è almeno un doppio tap il periodo di "pausa" dopo ogni colpo si riduce da 0.35 s a 0.10 s, per riuscire a rilevare il secondo. Se noti un singolo tap contato due volte (eco), sposta il PC su una superficie più ferma o disattiva il doppio tap con `--double-ms 0`.
+- Prova con `python tapzones.py run --dry` e guarda se il terminale scrive `sinistra x2` quando fai il doppio tap.
 
 > ⚠️ **Attenzione:** le azioni `run` vengono eseguite con `shell=True` a ogni tap riconosciuto. Metti in `actions.json` solo comandi di cui ti fidi e non usare file di azioni scaricati da altri senza controllarli.
 
@@ -141,6 +152,7 @@ Su Windows puoi anche usare **Ctrl+Alt+P**:
 | `--gain X` | `meter`, `calibrate`, `run` | Amplificazione software del segnale |
 | `--min-conf X` | `run` | Confidenza minima (0-1, default 0.15) |
 | `--dry` | `run` | Non eseguire le azioni |
+| `--double-ms N` | `run` | Finestra per il secondo tap in ms (default 400, `0` = doppio tap disattivato) |
 
 ### Ridurre i falsi positivi
 

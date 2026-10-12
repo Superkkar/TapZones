@@ -21,6 +21,8 @@ Azioni (file actions.json, creato dopo la calibrazione):
      "destra":   {"type": "keys", "value": "playpause"},
      "sotto":    {"type": "run",  "value": "calc.exe"}}
     type: none | url | run | keys   (keys richiede pyautogui; es. "ctrl+shift+m", "volumeup")
+Doppio tap: aggiungi una voce con il nome della zona + " x2", es. "sinistra x2" (stessa zona, due tap ravvicinati).
+Se una zona non ha il doppio tap, l'azione singola parte subito, senza attesa.
 ATTENZIONE: le azioni "run" vengono eseguite automaticamente a ogni tap riconosciuto.
 """
 import argparse
@@ -50,6 +52,8 @@ WIN_MS = 90            # finestra di analisi dopo l'impulso
 PRE_BLOCKS = 3         # blocchi di pre-roll conservati
 LEARN_S = 1.0          # secondi iniziali per imparare il rumore ambiente
 REFRACTORY_S = 0.35    # pausa dopo ogni evento
+REFRACTORY_DOUBLE_S = 0.10   # pausa ridotta quando in actions.json c'e' almeno un doppio tap
+DOUBLE_SUFFIX = " x2"       # chiave del doppio tap in actions.json: "sinistra x2"
 ABS_MIN = 0.003        # soglia RMS minima assoluta
 RATIO = 6.0            # l'impulso deve superare di N volte il rumore di fondo
 SUSTAIN = 0.5          # scarta suoni che non decadono (voce, musica)
@@ -76,6 +80,7 @@ class Detector:
         self.n = 0
         self.need = 0
         self.cool = 0
+        self.refractory = REFRACTORY_S
 
     def reset(self, cool_s=0.3):
         self.buf = None
@@ -115,7 +120,7 @@ class Detector:
     def _finish(self):
         x = np.concatenate(self.buf)
         self.buf = None
-        self.cool = int(REFRACTORY_S * self.sr / BLOCK)
+        self.cool = int(self.refractory * self.sr / BLOCK)
         self.hist.clear()
         m = x.mean(axis=1)
         peak = float(np.abs(m).max())
@@ -236,6 +241,7 @@ class Listener:
         self.sens = sensitivity
         self.q = queue.Queue()
         self.det = Detector(sr, sensitivity)
+        self.refractory = REFRACTORY_S
         self.stream = None
         self.open_ch = channels
 
@@ -246,6 +252,7 @@ class Listener:
         import sounddevice as sd
         self.q = queue.Queue()                    # stato pulito a ogni (ri)apertura
         self.det = Detector(self.sr, self.sens)
+        self.det.refractory = self.refractory
         maxch = sd.query_devices(self.device, "input")["max_input_channels"]
         # Alcuni driver (es. WASAPI sul Mic Array) accettano solo tutti i canali del dispositivo:
         # provo prima con i canali che servono, poi con tutti, e uso comunque solo i primi.
@@ -261,6 +268,10 @@ class Listener:
             except sd.PortAudioError as e:
                 last, self.stream = e, None
         raise last
+
+    def set_refractory(self, seconds):
+        self.refractory = seconds
+        self.det.refractory = seconds
 
     def __exit__(self, *exc):
         self.close()
@@ -636,6 +647,13 @@ def cmd_run(args):
     names, sr, ch = prof["zones"], prof["sr"], prof["channels"]
     model = Model().fit(prof["X"], prof["y"])
     actions, actions_mtime = {}, 0.0
+    window = max(0, args.double_ms) / 1000.0      # finestra per il secondo tap (0 = doppio tap disattivato)
+    L = None                                      # il Listener viene creato piu' sotto
+
+    def wants_fast():
+        """True se c'e' almeno un doppio tap con un'azione: serve il periodo refrattario ridotto."""
+        return window > 0 and any(k.endswith(DOUBLE_SUFFIX) and isinstance(v, dict)
+                                  and v.get("type", "none") != "none" for k, v in actions.items())
 
     def load_actions():
         """Rilegge actions.json solo se è cambiato (controllo fatto solo quando arriva un tap)."""
@@ -648,6 +666,8 @@ def cmd_run(args):
             try:
                 actions = json.loads(ACTIONS.read_text(encoding="utf-8"))
                 actions_mtime = mt
+                if L is not None:
+                    L.set_refractory(REFRACTORY_DOUBLE_S if wants_fast() else REFRACTORY_S)
             except Exception as e:
                 print(f"  (actions.json non leggibile, tengo la versione precedente: {e})")
 
@@ -681,7 +701,32 @@ def cmd_run(args):
     def stamp():
         return time.strftime("%H:%M:%S")
 
+    pending = None                                # primo tap in attesa di un eventuale secondo
+
+    def has_double(name):
+        a = actions.get(name + DOUBLE_SUFFIX)
+        return window > 0 and isinstance(a, dict) and a.get("type", "none") != "none"
+
+    def fire(name, conf, ms=0.0, double=False):
+        label = name + DOUBLE_SUFFIX if double else name
+        act = actions.get(label, {"type": "none"})
+        print(f"  ✔ {label}  conf {conf:.2f}  ({ms:.0f} ms)  -> {act.get('type', 'none')}")
+        note_event("ok", f"{label} ({conf:.2f})")
+        if not args.dry:
+            do_action(act)
+
+    def flush_pending():
+        """Il secondo tap non e' arrivato (o e' arrivato altrove): il primo vale come tap singolo."""
+        nonlocal pending
+        if pending is not None:
+            p, pending = pending, None
+            fire(p["name"], p["conf"], p["ms"])
+
+    def pending_due():
+        return pending is not None and time.time() - pending["ts"] > window
+
     def handle(kind, data):
+        nonlocal pending
         if kind == "rej":
             print(f"  · ignorato: {data}")
             if "debole" in data:                 # solo i tap mancati; suoni prolungati/voce non fanno lampeggiare
@@ -698,11 +743,17 @@ def cmd_run(args):
         else:
             name = names[zone]
             load_actions()
-            act = actions.get(name, {"type": "none"})
-            print(f"  ✔ {name}  conf {conf:.2f}  ({ms:.0f} ms)  -> {act.get('type', 'none')}")
-            note_event("ok", f"{name} ({conf:.2f})")
-            if not args.dry:
-                do_action(act)
+            now = time.time()
+            if pending is not None and pending["name"] == name and now - pending["ts"] <= window:
+                pending = None
+                fire(name, conf, ms, double=True)      # stessa zona entro la finestra: doppio tap
+                return
+            flush_pending()                            # altra zona o troppo tardi: il primo era un singolo
+            if has_double(name):
+                pending = {"name": name, "conf": conf, "ms": ms, "ts": now}
+                print(f"  … {name}: attendo un secondo tap ({args.double_ms} ms)")
+            else:
+                fire(name, conf, ms)                   # nessun doppio per questa zona: parte subito
 
     last_app = 0.0                                # ultimo istante in cui un'app "da chiamata" era in primo piano
 
@@ -731,6 +782,7 @@ def cmd_run(args):
     print(f"Pausa automatica con: {', '.join(keywords) if keywords else 'disattivata'}"
           + ("  |  Ctrl+Alt+P = pausa/riprendi a mano" if hotkey else ""))
     L = Listener(sr, ch, dev, args.sensitivity, gain)
+    L.set_refractory(REFRACTORY_DOUBLE_S if wants_fast() else REFRACTORY_S)
     is_open, warned_busy = False, False
     last_state = None
 
@@ -748,6 +800,7 @@ def cmd_run(args):
             if reason and is_open:
                 L.close()
                 is_open = False
+                pending = None
                 print(f"[{stamp()}] ⏸  microfono rilasciato: {reason}")
             elif not reason and not is_open:
                 try:
@@ -770,9 +823,15 @@ def cmd_run(args):
                 continue
             tick("listening")
             deadline = time.time() + 1.0          # titolo finestra / flag pausa controllati ~1 volta al secondo
-            for kind, data in L.events(stop=lambda: time.time() > deadline):
+            for kind, data in L.events(stop=lambda: time.time() > deadline or pending_due()):
                 try:
                     handle(kind, data)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+            if pending_due():                     # nessun secondo tap: esegui il singolo
+                try:
+                    flush_pending()
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -996,6 +1055,8 @@ def main():
         else:
             s.add_argument("--min-conf", type=float, default=0.15, help="confidenza minima (0-1)")
             s.add_argument("--dry", action="store_true", help="non eseguire le azioni")
+            s.add_argument("--double-ms", type=int, default=400,
+                           help="finestra (ms) per il secondo tap del doppio tap; 0 = disattivato (default 400)")
             s.add_argument("--pause-apps", default="whatsapp,discord,zoom,microsoft teams,google meet,skype,telegram",
                            help="rilascia il microfono quando la finestra in primo piano contiene una di queste parole "
                                 "(separate da virgola; \"\" per disattivare)")

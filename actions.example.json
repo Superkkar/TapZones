@@ -1,14 +1,8 @@
 {
-  "sinistra": {
-    "type": "url",
-    "value": "https://www.youtube.com"
-  },
-  "destra": {
-    "type": "keys",
-    "value": "playpause"
-  },
-  "sotto": {
-    "type": "run",
-    "value": "calc.exe"
-  }
+  "sinistra": { "type": "url", "value": "https://www.youtube.com" },
+  "sinistra x2": { "type": "url", "value": "https://claude.ai" },
+  "destra": { "type": "keys", "value": "playpause" },
+  "destra x2": { "type": "keys", "value": "nexttrack" },
+  "sotto": { "type": "run", "value": "calc.exe" },
+  "sotto x2": { "type": "none", "value": "" }
 }
