@@ -696,6 +696,7 @@ class CalibrationWindow:
         self.n = args.samples if args.samples else 20
 
         self.samples = {i: [] for i in range(self.k)}
+        self.history = []             # zona di ogni tocco accettato, in ordine (serve per l'annulla)
         self.counts  = [0] * self.k
         self.acc     = None
         self.active  = None
@@ -772,7 +773,7 @@ class CalibrationWindow:
             rb = tk.Radiobutton(ctr, text=str(val), variable=self.samples_var, value=val,
                                 font=("Segoe UI", 10), bg=self.BG, fg=self.TEXT,
                                 activebackground=self.BG, selectcolor=self.PANEL,
-                                highlightthickness=0, bd=0)
+                                highlightthickness=0, bd=0, command=self._on_n_change)
             rb.pack(side="left", padx=4)
             self.radio_btns.append(rb)
         self.start_btn = tk.Button(ctr, text="Inizia", command=self._on_start,
@@ -789,6 +790,21 @@ class CalibrationWindow:
         self.canvas.pack(fill="both", expand=True)
         self.laptop_center = laptop
         self.zone_centers  = centers
+
+        undo_row = tk.Frame(self.root, bg=self.BG, padx=16)
+        undo_row.pack(fill="x")
+        self.undo_btns = []
+        for label, cnt in (("Annulla ultimo", 1), ("Annulla ultimi 5", 5)):
+            b = tk.Button(undo_row, text=label, command=lambda c=cnt: self._undo(c),
+                          font=("Segoe UI", 9), bg=self.ZONE_IDLE, fg=self.TEXT,
+                          activebackground=self.ZONE_IDLE_EDGE, relief="flat",
+                          padx=12, pady=2, cursor="hand2", borderwidth=0, state="disabled")
+            b.pack(side="left", padx=(0, 8))
+            self.undo_btns.append(b)
+        tk.Label(undo_row, text="(Ctrl+Z / Backspace = annulla ultimo)",
+                 font=("Segoe UI", 8), bg=self.BG, fg=self.TEXT_DIM).pack(side="left")
+        self.root.bind("<Control-z>", lambda e: self._undo(1))
+        self.root.bind("<BackSpace>", lambda e: self._undo(1))
 
         bot = tk.Frame(self.root, bg=self.BG, padx=16, pady=10)
         bot.pack(fill="x")
@@ -948,6 +964,8 @@ class CalibrationWindow:
         i = self.active
         self.samples[i].append(data)
         self.counts[i] += 1
+        self.history.append(i)
+        self._update_undo_state()
         self._redraw_zone(i)
         self._start_pulse(i)
         if self.counts[i] >= self.n:
@@ -984,6 +1002,8 @@ class CalibrationWindow:
             return
         self.samples[i] = []
         self.counts[i] = 0
+        self.history = [z for z in self.history if z != i]
+        self._update_undo_state()
         self.acc = None
         self.done_all = False
         self.save_btn.configure(state="disabled")
@@ -1000,6 +1020,47 @@ class CalibrationWindow:
         self._set_active(i)
         self._redraw_all()
         self._set_status(f"Rifai '{self.names[i]}': tocca {self.n} volte.")
+
+    def _on_n_change(self):
+        """Cambio 10/20/50 prima di iniziare: aggiorna subito i contatori 0/N sotto ogni zona."""
+        if self.started:
+            return
+        self.n = self.samples_var.get()
+        self._redraw_all()
+
+    def _update_undo_state(self):
+        st = "normal" if (self.started and self.history) else "disabled"
+        for b in getattr(self, "undo_btns", []):
+            b.configure(state=st)
+
+    def _undo(self, count=1):
+        """Toglie gli ultimi `count` tocchi (anche attraverso più zone) senza rifare da capo."""
+        if not self.started or not self.history:
+            return
+        zone = None
+        for _ in range(min(count, len(self.history))):
+            zone = self.history.pop()
+            self.samples[zone].pop()
+            self.counts[zone] -= 1
+        # il calcolo finale non vale più: si riparte dalla zona dell'ultimo tocco tolto
+        self.acc = None
+        self.done_all = False
+        self.save_btn.configure(state="disabled")
+        try:
+            while True:
+                self.event_queue.get_nowait()
+        except queue.Empty:
+            pass
+        if self.L is not None:
+            try:
+                self.L.flush(0.4)
+            except Exception:
+                pass
+        self._set_active(zone)
+        self._redraw_all()
+        self._update_undo_state()
+        self._set_status(f"Annullato. Continua con '{self.names[zone]}': "
+                         f"{self.counts[zone]}/{self.n}.")
 
     def _on_save(self):
         if not self.done_all:
@@ -1634,11 +1695,11 @@ def cmd_tray(args, extra):
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Avvia", start, enabled=lambda i: not running() and not calib["on"]),
         pystray.MenuItem("Riavvia", restart, enabled=lambda i: not calib["on"]),
-        pystray.MenuItem(lambda i: "Riprendi" if PAUSE_FLAG.exists() else "Metti in pausa (Ctrl+Alt+P)",
+        pystray.MenuItem(lambda i: "Riprendi (Ctrl+Alt+P)" if PAUSE_FLAG.exists() else "Pausa (Ctrl+Alt+P)",
                          toggle, enabled=lambda i: running()),
         pystray.MenuItem("Calibra zone...", calibrate, enabled=lambda i: not calib["on"]),
         pystray.MenuItem("Ferma", stop, enabled=lambda i: running() and not calib["on"]),
-        pystray.MenuItem("Esci (ferma anche l'ascolto)", quit_panel),
+        pystray.MenuItem("Esci", quit_panel),
     )
     icon = pystray.Icon("tapzones", imgs["red"], "TapZones", menu)
 

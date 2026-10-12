@@ -78,7 +78,11 @@ Nella calibrazione da terminale, per ogni zona premi INVIO e tocca quell’area 
 python tapzones.py calibrate --gui
 ```
 
-Al posto del terminale si apre una finestra con il PC al centro e le zone attorno (le zone chiamate `sinistra`, `destra`, `sotto`/`davanti`, `sopra`/`dietro` stanno dal lato giusto; gli altri nomi occupano i posti liberi). Scegli quanti tocchi per zona e premi **Inizia**: la zona da toccare pulsa, a ogni tocco riconosciuto da quel lato parte un'onda luminosa che si allarga e il contatore sale; i tocchi scartati (troppo deboli, voce) li vedi segnalati e non vengono contati. Alla fine ogni zona mostra la sua accuratezza (verde, arancione o rossa): **clicca su una zona per rifarla**, poi **Salva**. L’interfaccia richiede `tkinter`: la sua disponibilità dipende dall’installazione di Python (su Debian/Ubuntu, in genere `sudo apt install python3-tk`). Se manca, il codice prova a tornare alla calibrazione da terminale.
+Al posto del terminale si apre una finestra con il PC al centro e le zone attorno (le zone chiamate `sinistra`, `destra`, `sotto`/`davanti`, `sopra`/`dietro` stanno dal lato giusto; gli altri nomi occupano i posti liberi). Scegli quanti tocchi per zona (10, 20 o 50: cambiando la scelta i contatori sotto ogni zona si aggiornano subito) e premi **Inizia**: la zona da toccare pulsa, a ogni tocco riconosciuto da quel lato parte un'onda luminosa che si allarga e il contatore sale; i tocchi scartati (troppo deboli, voce) li vedi segnalati e non vengono contati. Alla fine ogni zona mostra la sua accuratezza (verde, arancione o rossa): **clicca su una zona per rifarla**, poi **Salva**.
+
+Se un rumore o una notifica viene registrata come tocco, non serve ricominciare: usa **Annulla ultimo** (o `Ctrl+Z` / `Backspace`) oppure **Annulla ultimi 5**. L'annullamento toglie i colpi più recenti anche attraverso più zone, riapre la zona dove eri arrivato e, se avevi già finito, cancella il risultato così puoi aggiungere altri tocchi e ricalcolare. Dopo l'annullamento aspetta mezzo secondo prima di toccare di nuovo.
+
+L’interfaccia richiede `tkinter`: la sua disponibilità dipende dall’installazione di Python (su Debian/Ubuntu, in genere `sudo apt install python3-tk`). Se manca, il codice prova a tornare alla calibrazione da terminale.
 
 **Importante:** la ricalibrazione **riscrive** `profile.json` e non conserva gli esempi negativi aggiunti con `negatives`. Dopo una nuova calibrazione, esegui nuovamente `python tapzones.py negatives` se ne hai bisogno.
 
@@ -134,13 +138,15 @@ Mostra un'icona che avvia anche `run` in background:
 
 Dopo un evento segnalato l’icona **lampeggia per circa 0,6 secondi**: 🔵 **blu** se il tap è stato riconosciuto (azione eseguita), ⚪ **grigio** se è sembrato un tap ma è stato rifiutato (ambiguo, non calibrato, troppo debole), gli eventi rifiutati vengono limitati a uno ogni 3 secondi quando consecutivi; voce e suoni prolungati non fanno lampeggiare l’icona. Passando il mouse sull'icona vedi l'ultimo evento con l'orario, per esempio `ultimo: sinistra (0.62) (14:32:05)` oppure `ultimo: rifiutato: ambiguo tra zone (0.08)`: utile per capire perché un tap non fa nulla senza aprire il terminale.
 
-Dal menu puoi avviare, **riavviare** (utile dopo aver cambiato opzioni), mettere in pausa, fermare e **calibrare**. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si azzera a ogni avvio.
+Dal menu puoi avviare, **riavviare** (utile dopo aver cambiato opzioni), mettere in pausa, fermare e **calibrare**. La voce **Esci** chiude l'icona **e ferma anche `run`**, così il microfono viene rilasciato (chiudi sempre dal menu: chiudere la finestra del terminale con la X può lasciare `run` attivo in background). Eventuali opzioni extra (es. `--pause-hold 300`) vengono passate a `run`. Gli errori finiscono in `tapzones-errors.log`, che si accumula tra un avvio e l'altro (così non perdi gli errori di una calibrazione) e si azzera da solo solo quando supera i 100 KB.
+
+**Metti in pausa o Ferma?** La pausa (o `Ctrl+Alt+P` su Windows) lascia `run` in vita ma chiude il microfono; riprendi subito con **Riprendi** e l'icona diventa arancione. **Ferma** termina del tutto `run` (icona rossa) e per ripartire serve **Avvia**.
 
 ### Calibrare dall'icona
 
 Tasto destro sull'icona → **Calibra zone...**. TapZones ferma `run` (per liberare il microfono), apre la **calibrazione guidata** (vedi sopra) e, quando chiudi la finestra, **riavvia `run`** con il nuovo profilo. Durante la calibrazione l'icona è arancione ("calibrazione in corso").
 
-La calibrazione riusa microfono, guadagno e nomi delle zone del profilo esistente, così le azioni in `actions.json` restano valide; se non c'è ancora un profilo usa le zone di default (`sinistra,destra,sotto`). Se all'avvio dell'icona hai passato `--device`, `--gain` o `--sensitivity`, vengono usati anche per la calibrazione. Per cambiare i nomi o il numero delle zone usa `python tapzones.py calibrate --gui --zones ...` da terminale. Se `tkinter` non è disponibile, su Windows si apre la vecchia calibrazione da terminale; su macOS e Linux la voce chiede di installarlo.
+La calibrazione riusa microfono, guadagno e nomi delle zone del profilo esistente (il microfono viene ritrovato per nome e driver, non per indice, che può cambiare), così le azioni in `actions.json` restano valide; se non c'è ancora un profilo usa le zone di default (`sinistra,destra,sotto`). Se all'avvio dell'icona hai passato `--device`, `--gain` o `--sensitivity`, vengono usati anche per la calibrazione. Per cambiare i nomi o il numero delle zone usa `python tapzones.py calibrate --gui --zones ...` da terminale. Se `tkinter` non è disponibile, su Windows si apre la vecchia calibrazione da terminale; su macOS e Linux la voce chiede di installarlo.
 
 ## Pausa automatica e manuale
 
@@ -206,7 +212,7 @@ Occorre aver già calibrato. Devono essere rilevati **almeno 5 esempi**; altrime
 | `actions.json` | Le tue azioni |
 | `status.json` | Stato di `run`, scritto solo quando cambia (letto dall'icona) |
 | `pause.flag` | Esiste solo durante la pausa manuale |
-| `tapzones-errors.log` | Errori di `run` avviato dall'icona |
+| `tapzones-errors.log` | Errori di `run` e della calibrazione avviati dall'icona (si accumula, si azzera oltre 100 KB) |
 
 Sono dati locali potenzialmente personali. È consigliabile aggiungerli al `.gitignore` prima di pubblicare il progetto; il file `.gitignore` non era incluso negli allegati verificati.
 
@@ -227,6 +233,7 @@ L'audio viene elaborato in memoria e subito scartato: non viene salvato né invi
 ## Licenza
 
 Il README originale indica la licenza **MIT** e attribuisce l’ispirazione a [Holo](https://github.com/JustinGamer191/Holo) (MIT, © 2026 JustinGamer191 and Holo contributors). **Nota:** il file `LICENSE` non era tra gli allegati, quindi verifica che sia presente nel repository prima di pubblicare il collegamento.
+
 ## Diagnostica rapida
 
 ```bash
