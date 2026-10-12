@@ -1445,6 +1445,14 @@ def cmd_run(args):
         except Exception:
             pass
 
+def _log(msg):
+    """Riga nel log degli errori (usato dall'icona, che gira senza console)."""
+    try:
+        with open(HERE / "tapzones-errors.log", "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
 def calibrate_args(extra):
     """Argomenti per 'calibrate' lanciato dall'icona.
 
@@ -1469,7 +1477,10 @@ def calibrate_args(extra):
         prof = json.loads(PROFILE.read_text(encoding="utf-8"))
     except Exception:
         prof = {}
-    if not any(k.startswith("--device") for k in keep) and prof.get("device") is not None:
+    # Se il profilo ha nome+driver del microfono, NON passo l'indice: calibration_device()
+    # lo ritrova per nome (gli indici possono cambiare tra un avvio e l'altro).
+    if (not any(k.startswith("--device") for k in keep) and prof.get("device") is not None
+            and not prof.get("device_name")):
         keep += ["--device", str(prof["device"])]
     if not any(k.startswith("--gain") for k in keep) and prof.get("gain"):
         keep += ["--gain", str(prof["gain"])]
@@ -1528,7 +1539,12 @@ def cmd_tray(args, extra):
         flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}   # senza finestra
         # Niente log continuo: l'output normale viene scartato; su file vanno solo gli errori
         # (e il file si azzera a ogni avvio, quindi non cresce mai).
-        err = open(HERE / "tapzones-errors.log", "w", encoding="utf-8")
+        log = HERE / "tapzones-errors.log"
+        try:
+            big = log.exists() and log.stat().st_size > 100_000
+        except OSError:
+            big = False
+        err = open(log, "w" if big else "a", encoding="utf-8")   # append: non perdo gli errori della calibrazione
         subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), "run", *extra],
                          stdout=subprocess.DEVNULL, stderr=err, stdin=subprocess.DEVNULL,
                          cwd=str(HERE), **flags)
@@ -1554,7 +1570,7 @@ def cmd_tray(args, extra):
     alive = {"v": True}
 
     def calibrate(icon=None, item=None):
-        """Ferma 'run', apre la calibrazione (GUI se tkinter c'è), poi riavvia 'run'."""
+        """Ferma 'run', apre la calibrazione guidata, poi riavvia 'run'."""
         if calib["on"]:
             return
         calib["on"] = True
@@ -1563,33 +1579,40 @@ def cmd_tray(args, extra):
             was_running = running()
             try:
                 if was_running:
-                    stop()                  # il microfono deve essere libero
+                    stop()
                     time.sleep(0.5)
 
+                # Uso SEMPRE python.exe (non pythonw): è quello con cui la GUI
+                # funziona già. Su Windows nascondo la console con CREATE_NO_WINDOW
+                # così non c'è nessuna finestra cmd visibile, ma stdout/stderr
+                # del figlio li catturiamo e logghiamo.
                 exe = Path(sys.executable)
-                gui_ok = has_tk()
-                flags = 0
-                tail = []
-                if gui_ok:
-                    # Modalità GUI: nessuna finestra di console.
-                    # Su Windows uso pythonw.exe (mai console); altrove è indifferente.
-                    if sys.platform == "win32":
-                        if exe.name.lower() == "python.exe" and (exe.parent / "pythonw.exe").exists():
-                            exe = exe.parent / "pythonw.exe"
-                    tail = ["--gui"]
+                if sys.platform == "win32":
+                    if exe.name.lower() == "pythonw.exe":
+                        cand = exe.parent / "python.exe"
+                        if cand.exists():
+                            exe = cand
+                    flags = 0x08000000                     # CREATE_NO_WINDOW
                 else:
-                    # Fallback terminale: serve una console vera per l'input/output.
-                    if sys.platform == "win32":
-                        if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
-                            exe = exe.parent / "python.exe"
-                        flags = 0x00000010      # CREATE_NEW_CONSOLE
-                    tail = ["--hold"]
+                    flags = 0
 
-                cmd = [str(exe), str(Path(__file__).resolve()), "calibrate", *calibrate_args(extra), *tail]
-                subprocess.Popen(cmd, cwd=str(HERE), creationflags=flags).wait()
+                cmd = [str(exe), "-u", str(Path(__file__).resolve()),
+                       "calibrate", *calibrate_args(extra), "--gui"]
+                _log("avvio calibrazione: " + " ".join(str(c) for c in cmd))
+
+                err = open(HERE / "tapzones-errors.log", "a", encoding="utf-8")
+                try:
+                    proc = subprocess.Popen(cmd, cwd=str(HERE), creationflags=flags,
+                                            stdout=err, stderr=err, stdin=subprocess.DEVNULL)
+                    rc = proc.wait()
+                    _log(f"calibrazione terminata (exit code {rc})")
+                finally:
+                    try:
+                        err.close()
+                    except Exception:
+                        pass
             except Exception as e:
-                with open(HERE / "tapzones-errors.log", "a", encoding="utf-8") as f:
-                    f.write(f"calibrazione: {e}\n")
+                _log(f"calibrazione: eccezione nel lancio: {e!r}")
             finally:
                 calib["on"] = False
                 if was_running and alive["v"]:
