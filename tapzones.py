@@ -1369,7 +1369,7 @@ def cmd_run(args):
         label = name + DOUBLE_SUFFIX if double else name
         act = actions.get(label, {"type": "none"})
         print(f"  ✔ {label}  conf {conf:.2f}  ({ms:.0f} ms)  -> {act.get('type', 'none')}")
-        note_event("ok", f"{label} ({conf:.2f})")
+        note_event("double" if double else "ok", f"{label} ({conf:.2f})")
         if not args.dry:
             do_action(act)
 
@@ -1557,7 +1557,7 @@ def cmd_tray(args, extra):
         sys.exit("Servono due pacchetti: pip install pystray pillow")
     import threading
     colors = {"green": (34, 197, 94), "orange": (245, 158, 11), "red": (239, 68, 68),
-              "blue": (59, 130, 246), "gray": (148, 163, 184)}
+              "blue": (59, 130, 246), "purple": (168, 85, 247), "gray": (148, 163, 184)}
     FLASH_S = 0.6
 
     def make(rgb):
@@ -1587,7 +1587,8 @@ def cmd_tray(args, extra):
             if ev:
                 text += f" | ultimo: {ev['text']} ({time.strftime('%H:%M:%S', time.localtime(ev['ts']))})"
                 if time.time() - ev["ts"] < FLASH_S:
-                    return ("blue" if ev["kind"] == "ok" else "gray"), text
+                    flash = {"ok": "blue", "double": "purple"}.get(ev["kind"], "gray")
+                    return flash, text
             return "green", text
         return "orange", "in pausa: " + (st.get("reason") or "")
 
@@ -1695,11 +1696,11 @@ def cmd_tray(args, extra):
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Avvia", start, enabled=lambda i: not running() and not calib["on"]),
         pystray.MenuItem("Riavvia", restart, enabled=lambda i: not calib["on"]),
-        pystray.MenuItem(lambda i: "Riprendi (Ctrl+Alt+P)" if PAUSE_FLAG.exists() else "Pausa (Ctrl+Alt+P)",
+        pystray.MenuItem(lambda i: "Riprendi" if PAUSE_FLAG.exists() else "Metti in pausa (Ctrl+Alt+P)",
                          toggle, enabled=lambda i: running()),
         pystray.MenuItem("Calibra zone...", calibrate, enabled=lambda i: not calib["on"]),
         pystray.MenuItem("Ferma", stop, enabled=lambda i: running() and not calib["on"]),
-        pystray.MenuItem("Esci", quit_panel),
+        pystray.MenuItem("Esci (ferma anche l'ascolto)", quit_panel),
     )
     icon = pystray.Icon("tapzones", imgs["red"], "TapZones", menu)
 
