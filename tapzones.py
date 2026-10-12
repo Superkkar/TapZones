@@ -11,6 +11,7 @@ Uso:
     python tapzones.py calibrate           # registra le zone (default: sinistra,destra,sotto)
     python tapzones.py calibrate --zones sinistra,destra,davanti,dietro --samples 20
     python tapzones.py tray --autostart    # icona nella barra (verde/arancione/rosso) che avvia anche 'run'
+                                           # (tasto destro > "Calibra zone..." per ricalibrare senza terminale)
     python tapzones.py negatives           # (opzionale) insegna a ignorare voce e rumori
     python tapzones.py run                 # ascolta ed esegue le azioni di actions.json
     python tapzones.py run --dry           # ascolta e stampa soltanto, senza eseguire nulla
@@ -789,6 +790,39 @@ def cmd_run(args):
             pass
 
 
+def calibrate_args(extra):
+    """Argomenti per 'calibrate' lanciato dall'icona.
+
+    Dalle opzioni extra del tray tiene solo quelle valide anche per la calibrazione
+    (--device, --sensitivity, --gain); per il resto riusa microfono, guadagno e nomi
+    delle zone del profilo esistente, cosi' le azioni in actions.json restano valide.
+    """
+    keep, i = [], 0
+    while i < len(extra):
+        a = extra[i]
+        if a.split("=", 1)[0] in ("--device", "--sensitivity", "--gain"):
+            if "=" in a:
+                keep.append(a)
+                i += 1
+                continue
+            if i + 1 < len(extra):
+                keep += [a, extra[i + 1]]
+                i += 2
+                continue
+        i += 1
+    try:
+        prof = json.loads(PROFILE.read_text(encoding="utf-8"))
+    except Exception:
+        prof = {}
+    if not any(k.startswith("--device") for k in keep) and prof.get("device") is not None:
+        keep += ["--device", str(prof["device"])]
+    if not any(k.startswith("--gain") for k in keep) and prof.get("gain"):
+        keep += ["--gain", str(prof["gain"])]
+    if prof.get("zones"):
+        keep += ["--zones", ",".join(prof["zones"])]
+    return keep
+
+
 def cmd_tray(args, extra):
     try:
         import pystray
@@ -807,7 +841,11 @@ def cmd_tray(args, extra):
 
     imgs = {k: make(v) for k, v in colors.items()}
 
+    calib = {"on": False}
+
     def state():
+        if calib["on"]:
+            return "orange", "calibrazione in corso"
         st = read_status()
         if st is None:
             return "red", "non in esecuzione"
@@ -825,7 +863,7 @@ def cmd_tray(args, extra):
         return read_status() is not None
 
     def start(icon=None, item=None):
-        if running():
+        if running() or calib["on"]:
             return
         flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}   # senza finestra
         # Niente log continuo: l'output normale viene scartato; su file vanno solo gli errori
@@ -855,6 +893,41 @@ def cmd_tray(args, extra):
 
     alive = {"v": True}
 
+    def calibrate(icon=None, item=None):
+        """Ferma 'run', apre la calibrazione in una finestra di terminale, poi riavvia 'run'."""
+        if calib["on"]:
+            return
+        if sys.platform != "win32":
+            msg = "Dal menu la calibrazione e' disponibile solo su Windows: usa 'python tapzones.py calibrate'"
+            print(msg, file=sys.stderr)
+            try:
+                icon.notify(msg, "TapZones")
+            except Exception:
+                pass
+            return
+        calib["on"] = True
+
+        def work():
+            was_running = running()
+            try:
+                if was_running:
+                    stop()                  # il microfono deve essere libero
+                    time.sleep(0.5)
+                exe = Path(sys.executable)
+                if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+                    exe = exe.parent / "python.exe"      # pythonw non ha console: serve python.exe
+                cmd = [str(exe), str(Path(__file__).resolve()), "calibrate", *calibrate_args(extra), "--hold"]
+                subprocess.Popen(cmd, cwd=str(HERE), creationflags=0x00000010).wait()   # CREATE_NEW_CONSOLE
+            except Exception as e:
+                with open(HERE / "tapzones-errors.log", "a", encoding="utf-8") as f:
+                    f.write(f"calibrazione: {e}\n")
+            finally:
+                calib["on"] = False
+                if was_running and alive["v"]:
+                    start()                 # riparte con il profilo appena salvato
+
+        threading.Thread(target=work, daemon=True).start()
+
     def quit_panel(icon, item):
         alive["v"] = False
         stop()                      # ferma anche 'run': il microfono viene rilasciato davvero
@@ -867,11 +940,12 @@ def cmd_tray(args, extra):
     menu = pystray.Menu(
         pystray.MenuItem(lambda i: "TapZones: " + state()[1], lambda i: None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Avvia", start, enabled=lambda i: not running()),
-        pystray.MenuItem("Riavvia", restart),
+        pystray.MenuItem("Avvia", start, enabled=lambda i: not running() and not calib["on"]),
+        pystray.MenuItem("Riavvia", restart, enabled=lambda i: not calib["on"]),
         pystray.MenuItem(lambda i: "Riprendi" if PAUSE_FLAG.exists() else "Metti in pausa (Ctrl+Alt+P)",
                          toggle, enabled=lambda i: running()),
-        pystray.MenuItem("Ferma", stop, enabled=lambda i: running()),
+        pystray.MenuItem("Calibra zone...", calibrate, enabled=lambda i: not calib["on"]),
+        pystray.MenuItem("Ferma", stop, enabled=lambda i: running() and not calib["on"]),
         pystray.MenuItem("Esci (ferma anche l'ascolto)", quit_panel),
     )
     icon = pystray.Icon("tapzones", imgs["red"], "TapZones", menu)
@@ -916,6 +990,7 @@ def main():
                        help="amplificazione software (se omesso in run: quella della calibrazione)")
         if name == "calibrate":
             s.add_argument("--zones", default="sinistra,destra,sotto")
+            s.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)   # usata dall'icona: finestra aperta a fine lavoro
             s.add_argument("--samples", type=int, default=None,
                            help="tocchi per zona (se omesso te lo chiede: 10, 20 o 50)")
         else:
@@ -943,6 +1018,21 @@ def main():
         return
     if extra:
         p.error("argomenti non riconosciuti: " + " ".join(extra))
+    if getattr(args, "hold", False):
+        try:
+            args.fn(args)
+        except SystemExit as e:
+            if isinstance(e.code, str):
+                print(e.code)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        finally:
+            try:
+                input("\nPremi INVIO per chiudere questa finestra...")
+            except EOFError:
+                pass
+        return
     args.fn(args)
 
 
