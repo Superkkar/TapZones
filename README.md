@@ -78,7 +78,9 @@ Nella calibrazione da terminale, per ogni zona premi INVIO e tocca quell’area 
 python tapzones.py calibrate --gui
 ```
 
-Al posto del terminale si apre una finestra con il PC al centro e le zone attorno (le zone chiamate `sinistra`, `destra`, `sotto`/`davanti`, `sopra`/`dietro` stanno dal lato giusto; gli altri nomi occupano i posti liberi). Scegli quanti tocchi per zona (10, 20 o 50: cambiando la scelta i contatori sotto ogni zona si aggiornano subito) e premi **Inizia**: la zona da toccare pulsa, a ogni tocco riconosciuto da quel lato parte un'onda luminosa che si allarga e il contatore sale; i tocchi scartati (troppo deboli, voce) li vedi segnalati e non vengono contati. Alla fine ogni zona mostra la sua accuratezza (verde, arancione o rossa): **clicca su una zona per rifarla**, poi **Salva**.
+Al posto del terminale si apre una finestra con il PC al centro e le zone attorno (le zone chiamate `sinistra`, `destra`, `sotto`/`davanti`, `sopra`/`dietro` stanno dal lato giusto; gli altri nomi occupano i posti liberi). Scegli quanti tocchi per zona (10, 20 o 50: cambiando la scelta i contatori sotto ogni zona si aggiornano subito) e premi **Inizia**: la zona da toccare pulsa, a ogni tocco riconosciuto da quel lato parte un'onda luminosa che si allarga e il contatore sale; i tocchi scartati (troppo deboli, voce) li vedi segnalati e non vengono contati. Alla fine ogni zona mostra la sua accuratezza (verde, arancione o rossa): **clicca su una zona per rifare i suoi tocchi singoli** (**Ctrl+clic** per rifare i suoi doppi tocchi), poi **Salva**.
+
+**Doppi tocchi:** con la casella «Calibra anche i doppi tocchi» attiva (di default), dopo i tocchi singoli parte una seconda fase: per ogni zona dai due colpi veloci di seguito, esattamente come li userai (5, 10 o 25 coppie secondo la scelta 10/20/50). Il programma misura la distanza tra i due colpi e la salva nel profilo, insieme ai due suoni di ogni coppia, che aiutano a riconoscere anche il secondo colpo (spesso un po' diverso dal primo). Coppie con colpi più vicini di 120 ms (eco) o più lontani di 600 ms non contano. Da questi dati `run` ricava da solo l'attesa del secondo tap e la pausa dopo ogni colpo. Se un colpo non viene contato, in basso vedi il motivo e il totale degli scartati (deboli, prolungati, ravvicinati, lenti); se il secondo colpo viene scartato, la coppia va rifatta. Togli la spunta se non usi i doppi tap.
 
 Se un rumore o una notifica viene registrata come tocco, non serve ricominciare: usa **Annulla ultimo** (o `Ctrl+Z` / `Backspace`) oppure **Annulla ultimi 5**. L'annullamento toglie i colpi più recenti anche attraverso più zone, riapre la zona dove eri arrivato e, se avevi già finito, cancella il risultato così puoi aggiungere altri tocchi e ricalcolare. Dopo l'annullamento aspetta mezzo secondo prima di toccare di nuovo.
 
@@ -118,8 +120,8 @@ Il file viene riletto **al successivo tap rilevato** quando la sua data di modif
 Per assegnare un'azione al doppio tap aggiungi una voce con il nome della zona seguito da ` x2` (vedi `actions.example.json`): `"sinistra x2"` scatta con due tap ravvicinati **nella stessa zona**.
 
 - Se due tap cadono in zone diverse (es. sinistra e poi destra) valgono come due tap singoli.
-- Una zona **senza** voce `x2` non ha nessuna attesa: l'azione singola parte subito. Solo le zone con una voce `x2` attiva (tipo diverso da `none`) aspettano `--double-ms` (default 400 ms) prima di eseguire il singolo, per vedere se arriva il secondo colpo.
-- Quando c’è almeno un doppio tap attivo il periodo di "pausa" dopo ogni colpo si riduce da 0.35 s a 0.10 s, per riuscire a rilevare il secondo. Se noti un singolo tap contato due volte (eco), sposta il PC su una superficie più ferma o disattiva il doppio tap con `--double-ms 0`.
+- Una zona **senza** voce `x2` non ha nessuna attesa: l'azione singola parte subito. Solo le zone con una voce `x2` attiva (tipo diverso da `none`) aspettano `--double-ms` prima di eseguire il singolo, per vedere se arriva il secondo colpo. Se hai calibrato i doppi tocchi, l'attesa è quella misurata (di solito 250-400 ms); altrimenti 400 ms.
+- Quando c’è almeno un doppio tap attivo il periodo di "pausa" dopo ogni colpo si riduce da 0.35 s a 0.04 s (o al valore ricavato dalla calibrazione dei doppi tocchi), per riuscire a rilevare anche il secondo colpo dei doppi veloci. Se `run` non riconosce i tuoi doppi tap, ricalibra con la casella dei doppi tocchi attiva. Se noti un singolo tap contato due volte (eco), sposta il PC su una superficie più ferma o disattiva il doppio tap con `--double-ms 0`.
 - Prova con `python tapzones.py run --dry` e guarda se il terminale scrive `sinistra x2` quando fai il doppio tap.
 
 > ⚠️ **Attenzione:** le azioni `run` vengono eseguite con `shell=True` a ogni tap riconosciuto. Metti in `actions.json` solo comandi di cui ti fidi e non usare file di azioni scaricati da altri senza controllarli.
@@ -177,7 +179,7 @@ Su Windows puoi anche usare **Ctrl+Alt+P**:
 | `--zones A,B,...` | `calibrate` | Nomi delle zone, separati da virgole (default `sinistra,destra,sotto`) |
 | `--min-conf X` | `run` | Confidenza minima (0-1, default 0.15) |
 | `--dry` | `run` | Non eseguire le azioni |
-| `--double-ms N` | `run` | Finestra per il secondo tap in ms (default 400, `0` = doppio tap disattivato) |
+| `--double-ms N` | `run` | Finestra per il secondo tap in ms (se omessa: quella misurata in calibrazione, altrimenti 400; `0` = doppio tap disattivato) |
 | `--pause-apps "..."` | `run` | Su Windows, titoli di app che attivano la pausa; lista separata da virgole, `""` la disattiva |
 | `--pause-hold N` | `run` | Durata aggiuntiva della pausa in secondi (default 120) |
 | `--autostart` | `tray` | Avvia anche `run` all’apertura dell’icona |
@@ -208,10 +210,11 @@ Occorre aver già calibrato. Devono essere rilevati **almeno 5 esempi**; altrime
 
 | File | Contenuto |
 |------|-----------|
-| `profile.json` | Calibrazione (solo feature numeriche, **nessun audio**) e nome del microfono |
+| `profile.json` | Calibrazione (solo feature numeriche, **nessun audio**), nome del microfono e tempi dei doppi tocchi |
 | `actions.json` | Le tue azioni |
 | `status.json` | Stato di `run`, scritto solo quando cambia (letto dall'icona) |
 | `pause.flag` | Esiste solo durante la pausa manuale |
+| `tapzones-calib.log` | Cronologia dell'ultima calibrazione grafica: ogni colpo accettato o scartato (con il motivo) e la distanza di ogni coppia dei doppi tocchi |
 | `tapzones-errors.log` | Errori di `run` e della calibrazione avviati dall'icona (si accumula, si azzera oltre 100 KB) |
 
 Sono dati locali potenzialmente personali. È consigliabile aggiungerli al `.gitignore` prima di pubblicare il progetto; il file `.gitignore` non era incluso negli allegati verificati.

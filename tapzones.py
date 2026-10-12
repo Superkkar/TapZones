@@ -54,7 +54,10 @@ WIN_MS = 90            # finestra di analisi dopo l'impulso
 PRE_BLOCKS = 3         # blocchi di pre-roll conservati
 LEARN_S = 1.0          # secondi iniziali per imparare il rumore ambiente
 REFRACTORY_S = 0.35    # pausa dopo ogni evento
-REFRACTORY_DOUBLE_S = 0.10   # pausa ridotta quando in actions.json c'e' almeno un doppio tap
+REFRACTORY_DOUBLE_S = 0.04   # pausa ridotta quando in actions.json c'e' almeno un doppio tap (se non calibrata)
+REFRACTORY_CALIB_S = 0.02    # pausa usata mentre si calibrano i doppi tocchi (per misurare anche quelli veloci)
+DOUBLE_MIN_GAP_S = 0.12      # distanza minima tra i due colpi: sotto e' quasi certamente un'eco
+DOUBLE_MAX_GAP_S = 0.60      # oltre questa distanza non e' un doppio tap
 DOUBLE_SUFFIX = " x2"       # chiave del doppio tap in actions.json: "sinistra x2"
 ABS_MIN = 0.003        # soglia RMS minima assoluta
 RATIO = 6.0            # l'impulso deve superare di N volte il rumore di fondo
@@ -81,6 +84,9 @@ class Detector:
         self.need = 0
         self.cool = 0
         self.refractory = REFRACTORY_S
+        self.pos = 0                  # campioni ricevuti finora (orologio del segnale)
+        self.buf_start = 0
+        self.last_onset_s = None      # istante (s) dell'inizio dell'ultimo colpo valutato
 
     def reset(self, cool_s=0.3):
         self.buf = None
@@ -91,6 +97,8 @@ class Detector:
         """Ritorna None, oppure ('ok', finestra) / ('rej', motivo)."""
         mono = block.mean(axis=1)
         r = rms(mono) + 1e-12
+        pos0 = self.pos
+        self.pos += len(block)
         if self.buf is not None:                       # sto raccogliendo la finestra
             self.buf.append(block)
             self.n += len(block)
@@ -108,6 +116,7 @@ class Detector:
             self.hist.clear()
             return None
         if r > max(ABS_MIN, self.floor * self.ratio):  # onset!
+            self.buf_start = pos0 - sum(len(b) for b in self.hist)
             self.buf = list(self.hist) + [block]
             self.hist.clear()
             self.n = sum(len(b) for b in self.buf)
@@ -129,6 +138,7 @@ class Detector:
         if peak < WEAK:
             return ("rej", "troppo debole")
         idx = int(np.argmax(np.abs(m) > 0.25 * peak))   # allinea sull'inizio del colpo
+        self.last_onset_s = (self.buf_start + idx) / self.sr
         start = max(0, idx - int(0.002 * self.sr))
         w = x[start:start + self.win]
         if len(w) < self.win:
@@ -229,6 +239,20 @@ def leave_one_out(X, y):
         preds.append(int(np.argmin(d)))
         own.append(d[y[i]])
     return np.array(preds), np.array(own)
+
+def double_settings(gaps):
+    """Dalle distanze (s) misurate tra i due colpi dei doppi tocchi ricava l'attesa del 2° tap e la pausa per 'run'."""
+    g = np.asarray([x for x in gaps if x is not None], float)
+    if len(g) < 5:
+        return None
+    lo, med, hi = (float(np.percentile(g, q)) for q in (5, 50, 95))
+    return {"n": int(len(g)),
+            "gap_ms_min": int(round(lo * 1000)), "gap_ms_med": int(round(med * 1000)),
+            "gap_ms_max": int(round(hi * 1000)),
+            # attesa del secondo tap: un po' oltre la distanza piu' lenta misurata
+            "window_ms": int(np.clip(hi * 1000 * 1.25 + 40, 250, 700)),
+            # pausa dopo un colpo: abbastanza corta da vedere il secondo del tuo doppio tap piu' veloce
+            "refractory": round(float(np.clip(lo - 0.13, 0.01, 0.10)), 3)}
 
 # ---- audio ---------------------------------------------------------------
 class Listener:
@@ -696,8 +720,14 @@ class CalibrationWindow:
         self.n = args.samples if args.samples else 20
 
         self.samples = {i: [] for i in range(self.k)}
-        self.history = []             # zona di ogni tocco accettato, in ordine (serve per l'annulla)
+        self.history = []             # ("s"|"d", zona) di ogni voce accettata, in ordine (serve per l'annulla)
         self.counts  = [0] * self.k
+        self.phase   = "single"       # "single" = tocchi singoli, "double" = doppi tocchi
+        self.double_on = True
+        self.n2      = 10             # coppie di tocchi per zona (fissato all'avvio)
+        self.pairs   = {i: [] for i in range(self.k)}   # {"f1","f2","gap"} per ogni doppio tocco
+        self.pcounts = [0] * self.k
+        self.pending_tap = None       # primo colpo di una coppia in attesa del secondo: (feature, istante)
         self.acc     = None
         self.active  = None
         self.started = False
@@ -776,6 +806,13 @@ class CalibrationWindow:
                                 highlightthickness=0, bd=0, command=self._on_n_change)
             rb.pack(side="left", padx=4)
             self.radio_btns.append(rb)
+        self.double_var = tk.BooleanVar(value=True)
+        cb = tk.Checkbutton(ctr, text="Calibra anche i doppi tocchi", variable=self.double_var,
+                            font=("Segoe UI", 10), bg=self.BG, fg=self.TEXT,
+                            activebackground=self.BG, selectcolor=self.PANEL,
+                            highlightthickness=0, bd=0)
+        cb.pack(side="left", padx=(16, 0))
+        self.radio_btns.append(cb)          # si disabilita insieme ai 10/20/50 quando si parte
         self.start_btn = tk.Button(ctr, text="Inizia", command=self._on_start,
                                    font=("Segoe UI", 10, "bold"),
                                    bg=self.ZONE_ACTIVE, fg="white",
@@ -810,7 +847,7 @@ class CalibrationWindow:
         bot.pack(fill="x")
         self.status_lbl = tk.Label(bot, text="Scegli i tocchi e premi Inizia.",
                                    font=("Segoe UI", 10), bg=self.BG, fg=self.TEXT_DIM,
-                                   anchor="w", justify="left")
+                                   anchor="w", justify="left", wraplength=520)
         self.status_lbl.pack(side="left", fill="x", expand=True)
         self.save_btn = tk.Button(bot, text="Salva", command=self._on_save,
                                   font=("Segoe UI", 10, "bold"),
@@ -849,19 +886,30 @@ class CalibrationWindow:
                                 font=("Segoe UI", 9), fill=self.TEXT_DIM, tags=(tag,))
             self.zone_items[i] = {"rect": rect, "text": txt, "count": cnt}
             c.tag_bind(tag, "<Button-1>", lambda e, idx=i: self._on_zone_click(idx))
+            c.tag_bind(tag, "<Control-Button-1>", lambda e, idx=i: self._on_zone_click(idx, True))
             c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
 
     # -- stile / redraw ---------------------------------------------------
+    def _cur(self, i):
+        """(fatti, richiesti, prefisso) della fase in corso per la zona i."""
+        if self.phase == "double":
+            return self.pcounts[i], self.n2, "x2 "
+        return self.counts[i], self.n, ""
+
+    def _zone_done(self, i):
+        c, tot, _ = self._cur(i)
+        return c >= tot
+
     def _zone_style(self, i):
-        if self.acc is not None and self.counts[i] >= self.n:
+        if self.acc is not None and self._zone_done(i):
             a = self.acc[i]
             if a >= 0.9:   return self.ZONE_DONE, self.ZONE_DONE_ED, self.ZONE_TEXT_ON
             if a >= 0.8:   return self.ZONE_WARN, self.ZONE_WARN_ED, self.ZONE_TEXT_ON
             return              self.ZONE_BAD,  self.ZONE_BAD_ED,  self.ZONE_TEXT_ON
         if i == self.active:
             return self.ZONE_ACTIVE, self.ZONE_ACTIVE_ED, self.ZONE_TEXT_ON
-        if self.counts[i] >= self.n:
+        if self._zone_done(i):
             return self.ZONE_DONE, self.ZONE_DONE_ED, self.ZONE_TEXT_ON
         return self.ZONE_IDLE, self.ZONE_IDLE_EDGE, self.ZONE_TEXT
 
@@ -870,8 +918,9 @@ class CalibrationWindow:
         it = self.zone_items[i]
         self.canvas.itemconfig(it["rect"], fill=fill, outline=edge)
         self.canvas.itemconfig(it["text"], fill=tf)
-        t = f"{self.counts[i]}/{self.n}"
-        if self.acc is not None and self.counts[i] >= self.n:
+        c, tot, prefix = self._cur(i)
+        t = f"{prefix}{c}/{tot}"
+        if self.acc is not None and c >= tot:
             t += f"  ({self.acc[i] * 100:.0f}%)"
         self.canvas.itemconfig(it["count"], text=t,
                                fill=tf if fill != self.ZONE_IDLE else self.TEXT_DIM)
@@ -885,6 +934,15 @@ class CalibrationWindow:
         if self.started:
             return
         self.n = self.samples_var.get()
+        self.n2 = max(5, self.n // 2)
+        self.double_on = bool(self.double_var.get())
+        self.dtally = {}
+        try:
+            (HERE / "tapzones-calib.log").write_text(
+                f"calibrazione: {self.n} singoli e {self.n2} coppie per zona, zone {self.names}\n",
+                encoding="utf-8")
+        except Exception:
+            pass
         self.started = True
         for rb in self.radio_btns:
             rb.configure(state="disabled")
@@ -902,9 +960,47 @@ class CalibrationWindow:
 
     def _next_pending(self):
         for i in range(self.k):
-            if self.counts[i] < self.n:
+            if not self._zone_done(i):
                 return i
         return None
+
+    def _set_phase(self, phase):
+        """Cambia fase (singoli/doppi) e adatta la pausa del rilevatore: per misurare i doppi veloci serve corta."""
+        self.phase = phase
+        self.pending_tap = None
+        if self.L is not None:
+            try:
+                self.L.set_refractory(REFRACTORY_CALIB_S if phase == "double" else REFRACTORY_S)
+            except Exception:
+                pass
+
+    def _advance(self):
+        """Una zona e' completa: passa alla prossima zona, poi ai doppi tocchi, poi al calcolo finale."""
+        nxt = self._next_pending()
+        if nxt is not None:
+            self._set_active(nxt)
+            self._redraw_zone(nxt)
+            if self.phase == "double":
+                self._set_status(f"Ora '{self.names[nxt]}': due tocchi veloci di seguito, {self.n2} volte.")
+            else:
+                self._set_status(f"Ora tocca '{self.names[nxt]}'.")
+            return
+        if (self.phase == "single" and self.double_on
+                and any(self.pcounts[i] < self.n2 for i in range(self.k))):
+            self._set_phase("double")
+            if self.L is not None:
+                try:
+                    self.L.flush(0.5)
+                except Exception:
+                    pass
+            nxt = self._next_pending()
+            self._set_active(nxt)
+            self._redraw_all()
+            self._set_status(f"Ora i DOPPI tocchi: su '{self.names[nxt]}' dai due colpi veloci di seguito "
+                             f"(come li userai), {self.n2} volte.")
+            return
+        self._set_active(None)
+        self._finish_all()
 
     def _set_active(self, i):
         old = self.active
@@ -934,52 +1030,127 @@ class CalibrationWindow:
         while not self.stop_flag.is_set():
             try:
                 for kind, data in self.L.events(stop=lambda: self.stop_flag.is_set()):
+                    onset = self.L.det.last_onset_s     # istante del colpo appena valutato
                     if kind == "ok":
                         try:
-                            self.event_queue.put(("ok", features(data, self.sr)))
+                            self.event_queue.put(("ok", features(data, self.sr), onset))
                         except Exception:
                             pass
                     else:
-                        self.event_queue.put(("rej", data))
+                        self.event_queue.put(("rej", data, onset))
             except Exception:
                 break
 
     def _tick(self):
         try:
             while True:
-                kind, data = self.event_queue.get_nowait()
-                self._handle_event(kind, data)
+                kind, data, onset = self.event_queue.get_nowait()
+                self._handle_event(kind, data, onset)
         except queue.Empty:
             pass
         self._animate_pulses()
         self._animate_active()
         self.root.after(30, self._tick)
 
-    def _handle_event(self, kind, data):
+    def _dlog(self, msg):
+        """Riga nel log della calibrazione (tapzones-calib.log): serve a capire perche' un colpo non conta."""
+        try:
+            with open(HERE / "tapzones-calib.log", "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
+
+    def _tally(self, key):
+        self.dtally[key] = self.dtally.get(key, 0) + 1
+
+    def _tally_text(self):
+        if not self.dtally:
+            return ""
+        return "  |  scartati finora: " + ", ".join(f"{v} {k}" for k, v in self.dtally.items())
+
+    def _handle_event(self, kind, data, onset=None):
+        zone = self.names[self.active] if self.active is not None else "-"
         if kind == "rej":
-            self._set_status(f"Scartato: {data}", dim=True)
+            self._dlog(f"fase={self.phase} zona={zone} SCARTATO: {data}")
+            if self.phase == "double":
+                key = ("deboli" if "debole" in data else "prolungati" if "prolungato" in data
+                       else "saturati" if "forte" in data else "altro")
+                self._tally(key)
+                if self.pending_tap is not None:
+                    # il secondo colpo e' stato scartato: la coppia e' persa, la rifai da capo
+                    self.pending_tap = None
+                    self._update_undo_state()
+                    self._set_status(f"Secondo colpo scartato ({data}): rifai il doppio tocco."
+                                     + self._tally_text(), dim=True)
+                else:
+                    self._set_status(f"Scartato: {data}" + self._tally_text(), dim=True)
+            else:
+                self._set_status(f"Scartato: {data}", dim=True)
             return
+        self._dlog(f"fase={self.phase} zona={zone} ok onset={onset if onset is None else round(onset, 3)}")
         if self.active is None:
+            return
+        if self.phase == "double":
+            self._handle_double_tap(data, onset)
             return
         i = self.active
         self.samples[i].append(data)
         self.counts[i] += 1
-        self.history.append(i)
+        self.history.append(("s", i))
         self._update_undo_state()
         self._redraw_zone(i)
         self._start_pulse(i)
         if self.counts[i] >= self.n:
-            nxt = self._next_pending()
-            self._set_active(nxt)
-            if nxt is None:
-                self._finish_all()
-            else:
-                self._set_status(f"Zona '{self.names[i]}' ok. Ora tocca '{self.names[nxt]}'.")
-                self._redraw_zone(nxt)
+            self._advance()
+
+    def _handle_double_tap(self, data, onset):
+        """Fase doppi: due colpi ravvicinati nella stessa zona formano una coppia; ne misuro la distanza."""
+        i = self.active
+        self._start_pulse(i)
+        p = self.pending_tap
+        if p is not None and onset is not None and p[1] is not None:
+            gap = onset - p[1]
+            self._dlog(f"  coppia: distanza {gap * 1000:.0f} ms")
+            if gap < DOUBLE_MIN_GAP_S:
+                # troppo vicini: probabile eco del primo colpo, non conta
+                self._tally("ravvicinati")
+                self._set_status(f"Colpi troppo ravvicinati ({gap * 1000:.0f} ms, minimo "
+                                 f"{DOUBLE_MIN_GAP_S * 1000:.0f}): riprova." + self._tally_text(), dim=True)
+                self.pending_tap = None
+                return
+            if gap > DOUBLE_MAX_GAP_S:
+                # troppo lenti: il secondo diventa il primo di una nuova coppia
+                self._tally("lenti")
+                self.pending_tap = (data, onset)
+                self._set_status(f"Troppo lenti ({gap * 1000:.0f} ms, massimo "
+                                 f"{DOUBLE_MAX_GAP_S * 1000:.0f}): dai i due colpi più veloci."
+                                 + self._tally_text(), dim=True)
+                return
+            self.pending_tap = None
+            self.pairs[i].append({"f1": p[0], "f2": data, "gap": float(gap)})
+            self.pcounts[i] += 1
+            self.history.append(("d", i))
+            self._update_undo_state()
+            self._redraw_zone(i)
+            self._set_status(f"Doppio tocco {self.pcounts[i]}/{self.n2} su '{self.names[i]}' "
+                             f"(distanza {gap * 1000:.0f} ms).")
+            if self.pcounts[i] >= self.n2:
+                self._advance()
+            return
+        self.pending_tap = (data, onset)
+        self._update_undo_state()
+        self._set_status(f"Primo colpo ok su '{self.names[i]}': ora il secondo, subito dopo.")
 
     def _finish_all(self):
-        X = np.array([f for i in range(self.k) for f in self.samples[i]])
-        y = np.array([i for i in range(self.k) for _ in self.samples[i]])
+        rows, labels = [], []
+        for i in range(self.k):
+            for f in self.samples[i]:
+                rows.append(f)
+                labels.append(i)
+            for p in self.pairs[i]:                  # anche i due colpi dei doppi tocchi insegnano la zona
+                rows += [p["f1"], p["f2"]]
+                labels += [i, i]
+        X, y = np.array(rows), np.array(labels)
         preds, own = leave_one_out(X, y)
         self.acc = [float(np.mean(preds[y == i] == i)) for i in range(self.k)]
         self._redraw_all()
@@ -992,17 +1163,30 @@ class CalibrationWindow:
             if len(wrong):
                 other = self.names[int(np.bincount(wrong).argmax())]
                 msg += f"  '{self.names[worst]}' si confonde con '{other}' - clicca la zona per rifarla."
+        gaps = np.array([p["gap"] for i in range(self.k) for p in self.pairs[i]])
+        if len(gaps):
+            msg += f"  Doppio tocco: distanza tipica {np.median(gaps) * 1000:.0f} ms."
         self._set_status(msg, ok=(overall >= 0.85))
         self._X, self._y, self._own = X, y, own
         self.done_all = True
         self.save_btn.configure(state="normal")
 
-    def _on_zone_click(self, i):
+    def _on_zone_click(self, i, double=False):
+        """Clic = rifai i tocchi singoli della zona; Ctrl+clic = rifai i suoi doppi tocchi."""
         if not self.started:
             return
-        self.samples[i] = []
-        self.counts[i] = 0
-        self.history = [z for z in self.history if z != i]
+        if double:
+            if not self.double_on:
+                return
+            self.pairs[i] = []
+            self.pcounts[i] = 0
+            self.history = [h for h in self.history if h != ("d", i)]
+            self._set_phase("double")
+        else:
+            self.samples[i] = []
+            self.counts[i] = 0
+            self.history = [h for h in self.history if h != ("s", i)]
+            self._set_phase("single")
         self._update_undo_state()
         self.acc = None
         self.done_all = False
@@ -1019,7 +1203,10 @@ class CalibrationWindow:
                 pass
         self._set_active(i)
         self._redraw_all()
-        self._set_status(f"Rifai '{self.names[i]}': tocca {self.n} volte.")
+        if double:
+            self._set_status(f"Rifai i doppi tocchi di '{self.names[i]}': due colpi veloci, {self.n2} volte.")
+        else:
+            self._set_status(f"Rifai '{self.names[i]}': tocca {self.n} volte.")
 
     def _on_n_change(self):
         """Cambio 10/20/50 prima di iniziare: aggiorna subito i contatori 0/N sotto ogni zona."""
@@ -1029,19 +1216,31 @@ class CalibrationWindow:
         self._redraw_all()
 
     def _update_undo_state(self):
-        st = "normal" if (self.started and self.history) else "disabled"
+        st = "normal" if (self.started and (self.history or self.pending_tap is not None)) else "disabled"
         for b in getattr(self, "undo_btns", []):
             b.configure(state=st)
 
     def _undo(self, count=1):
-        """Toglie gli ultimi `count` tocchi (anche attraverso più zone) senza rifare da capo."""
-        if not self.started or not self.history:
+        """Toglie gli ultimi `count` tocchi o doppi tocchi (anche attraverso più zone) senza rifare da capo."""
+        if not self.started:
             return
-        zone = None
+        if self.pending_tap is not None:             # primo colpo di una coppia rimasto a meta'
+            self.pending_tap = None
+            self._update_undo_state()
+            self._set_status("Primo colpo scartato: rifai il doppio tocco.")
+            return
+        if not self.history:
+            return
+        zone, kind = None, "s"
         for _ in range(min(count, len(self.history))):
-            zone = self.history.pop()
-            self.samples[zone].pop()
-            self.counts[zone] -= 1
+            kind, zone = self.history.pop()
+            if kind == "d":
+                self.pairs[zone].pop()
+                self.pcounts[zone] -= 1
+            else:
+                self.samples[zone].pop()
+                self.counts[zone] -= 1
+        self._set_phase("double" if kind == "d" else "single")
         # il calcolo finale non vale più: si riparte dalla zona dell'ultimo tocco tolto
         self.acc = None
         self.done_all = False
@@ -1059,20 +1258,24 @@ class CalibrationWindow:
         self._set_active(zone)
         self._redraw_all()
         self._update_undo_state()
-        self._set_status(f"Annullato. Continua con '{self.names[zone]}': "
-                         f"{self.counts[zone]}/{self.n}.")
+        c, tot, prefix = self._cur(zone)
+        self._set_status(f"Annullato. Continua con '{self.names[zone]}': {prefix}{c}/{tot}.")
 
     def _on_save(self):
         if not self.done_all:
             return
         ood = float(1.5 * np.percentile(self._own, 95))
         dname, dapi = device_identity(self.args.device)
-        PROFILE.write_text(json.dumps({
+        prof = {
             "sr": self.sr, "channels": self.ch, "device": self.args.device,
             "device_name": dname, "device_api": dapi,
             "gain": self.args.gain, "zones": self.names,
             "X": self._X.tolist(), "y": self._y.tolist(), "ood": ood,
-        }))
+        }
+        dbl = double_settings([p["gap"] for i in range(self.k) for p in self.pairs[i]])
+        if dbl:
+            prof["double"] = dbl
+        PROFILE.write_text(json.dumps(prof))
         if not ACTIONS.exists():
             ACTIONS.write_text(json.dumps(
                 {nm: {"type": "none", "value": ""} for nm in self.names},
@@ -1305,7 +1508,12 @@ def cmd_run(args):
     names, sr, ch = prof["zones"], prof["sr"], prof["channels"]
     model = Model().fit(prof["X"], prof["y"])
     actions, actions_mtime = {}, 0.0
-    window = max(0, args.double_ms) / 1000.0      # finestra per il secondo tap (0 = doppio tap disattivato)
+    dbl = prof.get("double") or {}                # misurato in calibrazione (se hai calibrato i doppi tocchi)
+    if args.double_ms is not None:                # finestra per il secondo tap (0 = doppio tap disattivato)
+        window = max(0, args.double_ms) / 1000.0
+    else:
+        window = float(dbl.get("window_ms", 400)) / 1000.0
+    fast_ref = float(dbl.get("refractory", REFRACTORY_DOUBLE_S))   # pausa dopo un colpo quando ci sono doppi tap
     L = None                                      # il Listener viene creato piu' sotto
 
     def wants_fast():
@@ -1325,7 +1533,7 @@ def cmd_run(args):
                 actions = json.loads(ACTIONS.read_text(encoding="utf-8"))
                 actions_mtime = mt
                 if L is not None:
-                    L.set_refractory(REFRACTORY_DOUBLE_S if wants_fast() else REFRACTORY_S)
+                    L.set_refractory(fast_ref if wants_fast() else REFRACTORY_S)
             except Exception as e:
                 print(f"  (actions.json non leggibile, tengo la versione precedente: {e})")
 
@@ -1391,7 +1599,14 @@ def cmd_run(args):
                 note_event("rej", f"ignorato: {data}")
             return
         t0 = time.perf_counter()
-        zone, conf, why = model.predict(features(data, sr), prof["ood"], args.min_conf)
+        feat = features(data, sr)
+        zone, conf, why = model.predict(feat, prof["ood"], args.min_conf)
+        if pending is not None and time.time() - pending["ts"] <= window:
+            # Il secondo colpo di un doppio tap e' spesso un po' diverso dal primo (la scrivania vibra ancora):
+            # gli chiedo solo "e' la stessa zona del primo?", con soglie piu' larghe.
+            z2, c2, _ = model.predict(feat, prof["ood"] * 1.3, args.min_conf * 0.3)
+            if z2 is not None and z2 < len(names) and names[z2] == pending["name"]:
+                zone, conf, why = z2, max(conf, c2), ""
         ms = (time.perf_counter() - t0) * 1000
         if zone is None:
             print(f"  ? rifiutato: {why} (conf {conf:.2f})")
@@ -1409,7 +1624,7 @@ def cmd_run(args):
             flush_pending()                            # altra zona o troppo tardi: il primo era un singolo
             if has_double(name):
                 pending = {"name": name, "conf": conf, "ms": ms, "ts": now}
-                print(f"  … {name}: attendo un secondo tap ({args.double_ms} ms)")
+                print(f"  … {name}: attendo un secondo tap ({window * 1000:.0f} ms)")
             else:
                 fire(name, conf, ms)                   # nessun doppio per questa zona: parte subito
 
@@ -1440,7 +1655,7 @@ def cmd_run(args):
     print(f"Pausa automatica con: {', '.join(keywords) if keywords else 'disattivata'}"
           + ("  |  Ctrl+Alt+P = pausa/riprendi a mano" if hotkey else ""))
     L = Listener(sr, ch, dev, args.sensitivity, gain)
-    L.set_refractory(REFRACTORY_DOUBLE_S if wants_fast() else REFRACTORY_S)
+    L.set_refractory(fast_ref if wants_fast() else REFRACTORY_S)
     is_open, warned_busy = False, False
     last_state = None
 
@@ -1751,8 +1966,9 @@ def main():
         else:
             s.add_argument("--min-conf", type=float, default=0.15, help="confidenza minima (0-1)")
             s.add_argument("--dry", action="store_true", help="non eseguire le azioni")
-            s.add_argument("--double-ms", type=int, default=400,
-                           help="finestra (ms) per il secondo tap del doppio tap; 0 = disattivato (default 400)")
+            s.add_argument("--double-ms", type=int, default=None,
+                           help="finestra (ms) per il secondo tap del doppio tap; 0 = disattivato "
+                                "(se omesso: quella misurata in calibrazione, altrimenti 400)")
             s.add_argument("--pause-apps", default="whatsapp,discord,zoom,microsoft teams,google meet,skype,telegram",
                            help="rilascia il microfono quando la finestra in primo piano contiene una di queste parole "
                                 "(separate da virgola; \"\" per disattivare)")
